@@ -227,6 +227,86 @@
   .legend-group p:last-child{margin-bottom:0;}
   .legend-group p b{color:var(--text);font-weight:700;}
 
+  /* --- trade journal --- */
+  .journal-section{
+    margin-top:24px;border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);padding:18px 18px 20px;
+  }
+  .journal-title{
+    font-size:13px;letter-spacing:1px;color:var(--text);margin:0 0 14px;font-weight:700;
+  }
+  .journal-summary{
+    display:flex;gap:18px;flex-wrap:wrap;margin-bottom:16px;font-size:11px;color:var(--dim);
+  }
+  .journal-summary b{color:var(--green);font-size:13px;}
+  .journal-summary .neg-stat b{color:var(--red);}
+
+  .journal-form{
+    border:1px solid var(--line);border-radius:5px;padding:14px;margin-bottom:18px;
+    background:rgba(255,255,255,0.012);
+  }
+  .jf-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;}
+  .jf-row label{
+    display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--dim);
+    letter-spacing:0.3px;flex:1;min-width:140px;
+  }
+  .jf-row input, .jf-row select, .journal-form textarea{
+    background:var(--bg);border:1px solid var(--line);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:7px 9px;border-radius:3px;
+  }
+  .jf-row input:focus, .jf-row select:focus, .journal-form textarea:focus{
+    outline:none;border-color:var(--green);
+  }
+
+  .jf-checks{
+    border:1px solid var(--line);border-radius:4px;padding:10px 12px;margin-bottom:12px;
+    background:rgba(255,255,255,0.012);
+  }
+  .jf-checks-title{font-size:10px;color:var(--dim);letter-spacing:0.5px;margin-bottom:8px;}
+  .jf-check{
+    display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text);
+    padding:4px 0;cursor:pointer;
+  }
+  .jf-check input{cursor:pointer;}
+  .jf-check-note{font-size:10px;color:var(--dim);margin-top:6px;font-style:italic;}
+
+  .jf-notes-label{
+    display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--dim);
+    margin-bottom:14px;
+  }
+  .journal-form textarea{font-family:var(--mono);resize:vertical;}
+
+  .jf-actions{display:flex;gap:8px;}
+  .jf-actions button{
+    background:none;border:1px solid var(--line);color:var(--text);
+    font-family:var(--mono);font-size:11px;padding:8px 16px;border-radius:3px;cursor:pointer;
+  }
+  .jf-actions button[type="submit"]{border-color:var(--green);color:var(--green);font-weight:700;}
+  .jf-actions button:hover{border-color:var(--green);color:var(--green);}
+
+  .journal-log{overflow-x:auto;}
+  #journalTable{width:100%;border-collapse:collapse;font-size:11px;}
+  #journalTable th{
+    text-align:left;padding:8px 10px;color:var(--dim);font-weight:400;
+    letter-spacing:0.3px;border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  #journalTable td{
+    padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  #journalTable td.notes-cell{
+    white-space:normal;max-width:220px;color:var(--dim);font-size:10.5px;
+  }
+  .jt-outcome-win{color:var(--green);font-weight:700;}
+  .jt-outcome-loss{color:var(--red);font-weight:700;}
+  .jt-outcome-open{color:var(--amber);}
+  .jt-outcome-breakeven{color:var(--dim);}
+  .jt-delete-btn{
+    background:none;border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer;
+  }
+  .jt-delete-btn:hover{border-color:var(--red);color:var(--red);}
+  .journal-empty-note{text-align:center;color:var(--dim);font-size:11px;padding:16px 0;}
+
   ::-webkit-scrollbar{height:6px;width:6px;}
   ::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px;}
 
@@ -332,10 +412,6 @@
 
   <div id="content"><div class="loading">loading 4H candles…</div></div>
 
-  <footer>
-    4H closes only · EMA200 computed client-side from raw OHLC, seeded with a 1000-candle SMA warmup (Binance) for accuracy · crypto via Binance public API, stocks via Stooq daily-derived approx (see note on stocks tab) · this is a structural filter, not a signal — combine with HH/HL structure and liquidity sweep confirmation per your system.
-  </footer>
-
   <details class="legend-section">
     <summary>what does this all mean? (click to expand)</summary>
     <div class="legend-body">
@@ -393,6 +469,81 @@
 
     </div>
   </details>
+
+  <section class="journal-section">
+    <h2 class="journal-title">TRADE JOURNAL</h2>
+
+    <div class="journal-summary" id="journalSummary"></div>
+
+    <form id="journalForm" class="journal-form" onsubmit="submitJournalEntry(event)">
+      <div class="jf-row">
+        <label>date/time<input type="datetime-local" id="jf-datetime" required></label>
+        <label>ticker
+          <input type="text" id="jf-ticker" list="jf-ticker-list" placeholder="e.g. BTC" autocomplete="off" required>
+          <datalist id="jf-ticker-list"></datalist>
+        </label>
+        <label>direction
+          <select id="jf-direction">
+            <option value="long">long</option>
+            <option value="short">short</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="jf-checks">
+        <div class="jf-checks-title">setup checklist</div>
+        <label class="jf-check"><input type="checkbox" id="jf-check-1"> price above 4H EMA</label>
+        <label class="jf-check"><input type="checkbox" id="jf-check-2"> price not too far from EMA</label>
+        <label class="jf-check"><input type="checkbox" id="jf-check-3"> swept liquidity</label>
+        <label class="jf-check"><input type="checkbox" id="jf-check-4"> price making HHs and HLs</label>
+        <label class="jf-check"><input type="checkbox" id="jf-check-5"> impulsive candle with FVG</label>
+        <label class="jf-check"><input type="checkbox" id="jf-check-6"> retrace into OTE spot (fibs)</label>
+        <div class="jf-check-note" id="jf-autofill-note"></div>
+      </div>
+
+      <div class="jf-row">
+        <label>notional size ($)<input type="number" id="jf-notional" step="any" placeholder="e.g. 1000"></label>
+        <label>SL amount ($)<input type="number" id="jf-sl-usd" step="any" placeholder="e.g. 20"></label>
+        <label>SL amount (%)<input type="number" id="jf-sl-pct" step="any" placeholder="e.g. 2"></label>
+      </div>
+
+      <div class="jf-row">
+        <label>entry price<input type="number" id="jf-entry" step="any" placeholder="optional"></label>
+        <label>exit price<input type="number" id="jf-exit" step="any" placeholder="optional, fill in later"></label>
+        <label>outcome
+          <select id="jf-outcome">
+            <option value="open">open / not closed yet</option>
+            <option value="win">win</option>
+            <option value="loss">loss</option>
+            <option value="breakeven">breakeven</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="jf-notes-label">notes
+        <textarea id="jf-notes" rows="2" placeholder="anything that doesn't fit a checkbox..."></textarea>
+      </label>
+
+      <div class="jf-actions">
+        <button type="submit">log trade</button>
+        <button type="button" onclick="exportJournalCSV()">export CSV</button>
+        <button type="button" onclick="exportJournalJSON()">export JSON</button>
+      </div>
+    </form>
+
+    <div class="journal-log">
+      <table id="journalTable">
+        <thead>
+          <tr>
+            <th>date</th><th>ticker</th><th>dir</th><th>checks</th>
+            <th>notional</th><th>SL $</th><th>SL %</th>
+            <th>entry</th><th>exit</th><th>outcome</th><th>R</th><th>notes</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="journalTableBody"></tbody>
+      </table>
+    </div>
+  </section>
 
 </div>
 
@@ -1143,6 +1294,9 @@ async function loadAll(){
   document.getElementById('lastUpdated').textContent = 'updated ' + new Date().toLocaleString();
   btn.disabled = false;
   render();
+  // refresh the journal's ticker autocomplete list now that cryptoData is populated -
+  // this also keeps it in sync on every manual refresh, not just the initial page load
+  if(typeof populateJournalTickerList === 'function') populateJournalTickerList();
 }
 
 const TF_LABELS = {'4h':'4H · last 120 candles','12h':'12H · last 120 candles','1d':'1D · last 120 candles','3d':'3D · last 100 candles','1w':'1W · last 100 candles'};
@@ -1484,8 +1638,265 @@ async function toggleAlerts(){
   alertTimerId = setInterval(checkTouchAlerts, 60*60*1000); // every hour
 }
 
+// ===================== TRADE JOURNAL =====================
+// Entries persist in localStorage only (not synced across devices/browsers) - the
+// user explicitly chose this over a GitHub-API write-back approach to avoid storing
+// a write-access credential in the browser. The export buttons exist specifically as
+// a manual backup path given that tradeoff.
+const JOURNAL_STORAGE_KEY = 'ema_watch_journal_v1';
+
+function loadJournalEntries(){
+  try{
+    const raw = localStorage.getItem(JOURNAL_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+
+function saveJournalEntries(entries){
+  try{ localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(entries)); }
+  catch(e){ console.error('failed to save journal entries (storage full or unavailable)', e); }
+}
+
+let journalEntries = loadJournalEntries();
+
+// Sets the datetime-local input to "now" by default, formatted the way that input
+// type requires (local time, no timezone suffix, minute precision).
+function setJournalDatetimeToNow(){
+  const el = document.getElementById('jf-datetime');
+  if(!el) return;
+  const now = new Date();
+  const pad = n => String(n).padStart(2,'0');
+  const formatted = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  el.value = formatted;
+}
+
+// Populates the ticker datalist from whatever's currently loaded in cryptoData, so
+// typing a ticker that's actively on the watchlist offers autocomplete - and, more
+// importantly, lets us look up that coin's live data for the checklist auto-prefill.
+function populateJournalTickerList(){
+  const list = document.getElementById('jf-ticker-list');
+  if(!list) return;
+  list.innerHTML = cryptoData.map(d => `<option value="${d.symbol}">`).join('');
+}
+
+// When the user types/selects a ticker that matches a coin currently in cryptoData,
+// auto-prefill checks 1-3 (above EMA, not too far, swept liquidity) from that coin's
+// live computed data. The user can still override any of these manually afterward -
+// this only runs once per ticker change, it doesn't lock the checkboxes.
+function autofillJournalChecksFromTicker(){
+  const tickerInput = document.getElementById('jf-ticker');
+  const note = document.getElementById('jf-autofill-note');
+  if(!tickerInput || !note) return;
+  const ticker = tickerInput.value.trim().toUpperCase();
+  const match = cryptoData.find(d => d.symbol === ticker);
+
+  if(!match){
+    note.textContent = ticker ? 'ticker not found in current watchlist - fill checklist manually' : '';
+    return;
+  }
+
+  // check 1: above EMA
+  document.getElementById('jf-check-1').checked = !!match.above;
+  // check 2: "not too far" from EMA - reuse the same tight/extended boundary the
+  // score cap itself uses (<=2% counts as "not too far" for this checkbox's purpose)
+  document.getElementById('jf-check-2').checked = Math.abs(match.distPct) <= 2;
+  // check 3: swept liquidity - true if any timeframe has a qualifying recent sweep
+  document.getElementById('jf-check-3').checked = !!(match.score && match.score.sweptTFs.length > 0);
+
+  note.textContent = `checks 1-3 auto-filled from ${ticker}'s live data (${match.distPct>=0?'+':''}${match.distPct.toFixed(2)}% from EMA) - override any of them if needed`;
+}
+
+// Two-of-three auto-calc for notional/SL$/SL%: whichever field the user just edited,
+// fill in whichever of the other two is currently empty using the relationship
+// SL$ = notional * (SL% / 100). If both other fields already have values, we don't
+// overwrite either - the user can clear one manually if they want it recalculated.
+function handleJournalSizingInput(changedField){
+  const notionalEl = document.getElementById('jf-notional');
+  const slUsdEl = document.getElementById('jf-sl-usd');
+  const slPctEl = document.getElementById('jf-sl-pct');
+
+  const notional = parseFloat(notionalEl.value);
+  const slUsd = parseFloat(slUsdEl.value);
+  const slPct = parseFloat(slPctEl.value);
+
+  const hasNotional = !isNaN(notional) && notional > 0;
+  const hasSlUsd = !isNaN(slUsd) && slUsd > 0;
+  const hasSlPct = !isNaN(slPct) && slPct > 0;
+
+  // fill in whichever target field is empty, using the other two - but never
+  // overwrite the field the user is actively typing into (changedField), even if it
+  // happens to be empty mid-typing (e.g. they just cleared it to retype a new value)
+  if(changedField !== 'slPct' && hasNotional && hasSlUsd && !hasSlPct){
+    slPctEl.value = ((slUsd / notional) * 100).toFixed(3);
+  } else if(changedField !== 'slUsd' && hasNotional && hasSlPct && !hasSlUsd){
+    slUsdEl.value = (notional * (slPct / 100)).toFixed(2);
+  } else if(changedField !== 'notional' && hasSlUsd && hasSlPct && !hasNotional){
+    notionalEl.value = (slUsd / (slPct / 100)).toFixed(2);
+  }
+}
+
+// R-multiple: how many "stop-loss units" the realized profit/loss represents.
+// (exit - entry) / (entry - implied-stop-distance-from-SL%). We derive the per-unit
+// stop distance from SL% since that's always available once two of the three sizing
+// fields are filled, rather than requiring a separate explicit stop-price field.
+function computeRMultiple(direction, entry, exit, slPct){
+  if(!entry || !exit || !slPct) return null;
+  const riskPerUnit = entry * (slPct/100);
+  if(riskPerUnit <= 0) return null;
+  const pnlPerUnit = direction === 'short' ? (entry - exit) : (exit - entry);
+  return pnlPerUnit / riskPerUnit;
+}
+
+function submitJournalEntry(evt){
+  evt.preventDefault();
+
+  const ticker = document.getElementById('jf-ticker').value.trim().toUpperCase();
+  if(!ticker){ return; }
+
+  const direction = document.getElementById('jf-direction').value;
+  const notional = parseFloat(document.getElementById('jf-notional').value) || null;
+  const slUsd = parseFloat(document.getElementById('jf-sl-usd').value) || null;
+  const slPct = parseFloat(document.getElementById('jf-sl-pct').value) || null;
+  const entry = parseFloat(document.getElementById('jf-entry').value) || null;
+  const exit = parseFloat(document.getElementById('jf-exit').value) || null;
+  const outcome = document.getElementById('jf-outcome').value;
+  const notes = document.getElementById('jf-notes').value.trim();
+
+  const checks = [1,2,3,4,5,6].map(n => document.getElementById('jf-check-'+n).checked);
+
+  const rMultiple = computeRMultiple(direction, entry, exit, slPct);
+
+  const entry_obj = {
+    id: Date.now() + '_' + Math.random().toString(36).slice(2,7),
+    datetime: document.getElementById('jf-datetime').value,
+    ticker, direction, checks,
+    notional, slUsd, slPct, entry, exit, outcome,
+    rMultiple, notes
+  };
+
+  journalEntries.push(entry_obj);
+  saveJournalEntries(journalEntries);
+  renderJournalLog();
+
+  document.getElementById('journalForm').reset();
+  setJournalDatetimeToNow();
+  document.getElementById('jf-autofill-note').textContent = '';
+}
+
+function deleteJournalEntry(id){
+  journalEntries = journalEntries.filter(e => e.id !== id);
+  saveJournalEntries(journalEntries);
+  renderJournalLog();
+}
+
+function renderJournalSummary(){
+  const el = document.getElementById('journalSummary');
+  if(!el) return;
+  if(!journalEntries.length){ el.innerHTML = ''; return; }
+
+  const closed = journalEntries.filter(e => e.outcome === 'win' || e.outcome === 'loss' || e.outcome === 'breakeven');
+  const wins = closed.filter(e => e.outcome === 'win').length;
+  const winRate = closed.length ? ((wins/closed.length)*100).toFixed(1) : null;
+  const rValues = journalEntries.filter(e => e.rMultiple != null).map(e => e.rMultiple);
+  const avgR = rValues.length ? (rValues.reduce((s,v)=>s+v,0)/rValues.length).toFixed(2) : null;
+
+  el.innerHTML = `
+    <div>total trades: <b>${journalEntries.length}</b></div>
+    <div>closed: <b>${closed.length}</b></div>
+    ${winRate != null ? `<div class="${winRate<50?'neg-stat':''}">win rate: <b>${winRate}%</b></div>` : ''}
+    ${avgR != null ? `<div class="${avgR<0?'neg-stat':''}">avg R: <b>${avgR>=0?'+':''}${avgR}</b></div>` : ''}
+  `;
+}
+
+function renderJournalLog(){
+  const tbody = document.getElementById('journalTableBody');
+  if(!tbody) return;
+
+  renderJournalSummary();
+
+  if(!journalEntries.length){
+    tbody.innerHTML = '<tr><td colspan="13" class="journal-empty-note">no trades logged yet</td></tr>';
+    return;
+  }
+
+  // most recent first
+  const sorted = [...journalEntries].sort((a,b) => new Date(b.datetime) - new Date(a.datetime));
+
+  tbody.innerHTML = sorted.map(e => {
+    const checksPassedCount = e.checks.filter(Boolean).length;
+    const dt = e.datetime ? e.datetime.replace('T',' ') : '—';
+    const fmt = v => v == null ? '—' : v;
+    const rText = e.rMultiple != null ? `${e.rMultiple>=0?'+':''}${e.rMultiple.toFixed(2)}` : '—';
+    return `
+    <tr>
+      <td>${dt}</td>
+      <td>${e.ticker}</td>
+      <td>${e.direction}</td>
+      <td title="${e.checks.map((c,i)=>`check ${i+1}: ${c?'✓':'✗'}`).join(', ')}">${checksPassedCount}/6</td>
+      <td>${fmt(e.notional)}</td>
+      <td>${fmt(e.slUsd)}</td>
+      <td>${e.slPct!=null?e.slPct+'%':'—'}</td>
+      <td>${fmt(e.entry)}</td>
+      <td>${fmt(e.exit)}</td>
+      <td class="jt-outcome-${e.outcome}">${e.outcome}</td>
+      <td>${rText}</td>
+      <td class="notes-cell">${e.notes ? e.notes.replace(/</g,'&lt;') : ''}</td>
+      <td><button class="jt-delete-btn" onclick="deleteJournalEntry('${e.id}')">del</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function exportJournalJSON(){
+  if(!journalEntries.length){ alert('no journal entries to export yet'); return; }
+  const blob = new Blob([JSON.stringify(journalEntries, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `trade_journal_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportJournalCSV(){
+  if(!journalEntries.length){ alert('no journal entries to export yet'); return; }
+  const headers = ['datetime','ticker','direction','check1','check2','check3','check4','check5','check6',
+    'notional','slUsd','slPct','entry','exit','outcome','rMultiple','notes'];
+  const rows = journalEntries.map(e => [
+    e.datetime, e.ticker, e.direction,
+    ...e.checks.map(c => c ? 'TRUE' : 'FALSE'),
+    e.notional ?? '', e.slUsd ?? '', e.slPct ?? '', e.entry ?? '', e.exit ?? '',
+    e.outcome, e.rMultiple != null ? e.rMultiple.toFixed(3) : '',
+    (e.notes||'').replace(/"/g,'""')
+  ]);
+  const csv = [headers.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `trade_journal_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function initJournalForm(){
+  setJournalDatetimeToNow();
+  populateJournalTickerList();
+
+  const tickerInput = document.getElementById('jf-ticker');
+  if(tickerInput) tickerInput.addEventListener('input', autofillJournalChecksFromTicker);
+
+  ['jf-notional','jf-sl-usd','jf-sl-pct'].forEach(id => {
+    const el = document.getElementById(id);
+    if(!el) return;
+    const fieldKey = id === 'jf-notional' ? 'notional' : (id === 'jf-sl-usd' ? 'slUsd' : 'slPct');
+    el.addEventListener('input', () => handleJournalSizingInput(fieldKey));
+  });
+
+  renderJournalLog();
+}
+// ===================== END TRADE JOURNAL =====================
+
 loadAll();
 renderAlertLog();
+initJournalForm();
 </script>
 </body>
 </html>
