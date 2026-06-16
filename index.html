@@ -200,7 +200,7 @@
   <header>
     <div>
       <div class="title">EMA<span>200</span>/4H WATCH</div>
-      <div class="subtitle">top 100 USDT pairs by volume · market structure context · 4H timeframe · liquidity sweep confluence auto-flagged, not auto-traded</div>
+      <div class="subtitle">top 100 USDT pairs by 7-day avg volume · market structure context · 4H timeframe · liquidity sweep + FVG confluence auto-flagged, not auto-traded</div>
     </div>
     <div class="meta">
       <div id="lastUpdated">—</div>
@@ -265,7 +265,7 @@
       <span><span class="dot reclaimed"></span>swept + reclaimed (bullish close above)</span>
     </div>
     <div class="legend" style="margin-top:6px;">
-      <span><span class="dot fib"></span>fib retracement of last structure-break leg (4H only)</span>
+      <span><span class="dot fib"></span>fib of last structure-break leg that left an FVG (4H only)</span>
       <span><span class="dot fibote"></span>0.618–0.79 OTE zone</span>
     </div>
   </div>
@@ -280,7 +280,7 @@ const FALLBACK_CRYPTO_SYMBOLS = [
   "HBARUSDT","UNIUSDT","AAVEUSDT","MKRUSDT","PEPEUSDT","WIFUSDT"
 ];
 
-const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v1';
+const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v2_7davg';
 const SYMBOL_LIST_CACHE_TTL = 24 * 60 * 60 * 1000; // re-rank once a day; otherwise reuse cached list
 
 let CRYPTO_SYMBOLS = FALLBACK_CRYPTO_SYMBOLS;
@@ -289,6 +289,26 @@ let CRYPTO_SYMBOLS = FALLBACK_CRYPTO_SYMBOLS;
 // (the actual USD-denominated volume, which is the correct way to rank "top by volume"
 // rather than raw base-asset volume), and keeps the top 100. Cached for a day so we
 // don't re-rank on every single page load.
+//
+// Ranking is based on 7-DAY average daily volume rather than raw 24h volume, because
+// 24h volume alone lets through "dogshit coins" that had one freak spike day - a 7-day
+// average is a much better proxy for genuinely liquid, tradeable pairs. We use the 24hr
+// ticker first to get a broad initial pool (top 300 by 24h volume, cheap, 1 API call),
+// then fetch 7 daily candles per symbol in that pool to compute the true 7-day average
+// and re-rank by that before keeping the top 100.
+const INITIAL_POOL_SIZE = 300;
+
+async function fetch7DayAvgVolume(symbol){
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=7`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('7d volume fetch failed '+symbol);
+  const raw = await res.json();
+  if(!raw.length) return 0;
+  // kline[7] is quote asset volume (USDT-denominated), the correct basis for ranking liquidity
+  const totalQuoteVol = raw.reduce((sum,c) => sum + parseFloat(c[7]), 0);
+  return totalQuoteVol / raw.length;
+}
+
 async function loadTop100SymbolsByVolume(){
   try{
     const cached = JSON.parse(localStorage.getItem(SYMBOL_LIST_CACHE_KEY) || 'null');
@@ -306,14 +326,31 @@ async function loadTop100SymbolsByVolume(){
     !t.symbol.includes('UP') && !t.symbol.includes('DOWN') &&
     !t.symbol.includes('BULL') && !t.symbol.includes('BEAR')
   );
+  // initial broad cut by 24h volume, just to keep the next step (7-day lookups) to a
+  // manageable number of API calls instead of querying every USDT pair on Binance
   usdtPairs.sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
-  const top100 = usdtPairs.slice(0,100).map(t => t.symbol);
+  const pool = usdtPairs.slice(0, INITIAL_POOL_SIZE).map(t => t.symbol);
+
+  // now compute true 7-day average volume for everything in the pool, in chunks to
+  // respect rate limits, then re-rank by that more stable metric
+  const ranked = [];
+  const CHUNK = 15;
+  for(let i=0; i<pool.length; i+=CHUNK){
+    const chunk = pool.slice(i, i+CHUNK);
+    const settled = await Promise.allSettled(chunk.map(async sym => ({
+      symbol: sym,
+      avgVol7d: await fetch7DayAvgVolume(sym)
+    })));
+    settled.forEach(r => { if(r.status==='fulfilled') ranked.push(r.value); });
+  }
+  ranked.sort((a,b) => b.avgVol7d - a.avgVol7d);
+  const top100 = ranked.slice(0,100).map(r => r.symbol);
 
   try{
     localStorage.setItem(SYMBOL_LIST_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), symbols: top100 }));
   } catch(e){ /* storage full or unavailable, non-fatal */ }
 
-  return top100;
+  return top100.length ? top100 : pool.slice(0,100); // fallback to 24h ranking if 7d step somehow yields nothing
 }
 
 // Stocks: Stooq has no native 4H bars, so we build 4H bars from 1H data when available,
@@ -420,57 +457,82 @@ function detectFractalHighs(candles, side){
   return highs;
 }
 
-// Finds the most recent bullish "impulsive leg" that broke market structure, and
-// returns the fib retracement levels for it.
-//   Point A (fib 0%)   = the high of the breakout candle (the wick that broke structure)
-//   Point B (fib 100%) = the low of the candle that started the impulsive move
-//                         (defined here as the most recent fractal low BEFORE the breakout,
-//                         i.e. the swept/launch point of the move)
-// Standard SMC retracement levels are returned: 0.5, 0.618, 0.705, 0.79 (OTE zone), 1.0
+// Checks whether a bullish Fair Value Gap exists with `impulseIndex` as the middle
+// (impulsive) candle of the 3-candle pattern: candles[impulseIndex-1].high < candles[impulseIndex+1].low.
+// The empty space between those two wicks is the gap - price never traded through it,
+// which is what makes the move "impulsive" rather than just a normal break of structure.
+function hasFVGAtCandle(candles, impulseIndex){
+  if(impulseIndex < 1 || impulseIndex+1 >= candles.length) return false;
+  const left = candles[impulseIndex-1];
+  const right = candles[impulseIndex+1];
+  return left.h < right.l;
+}
+
+// Finds the most recent bullish "impulsive leg" that:
+//   1) broke a prior 4H structure (a candle's CLOSE trades above a confirmed swing high), AND
+//   2) left a Fair Value Gap somewhere in that breakout candle or the following 3 candles
+//      (per the user's system: an FVG within the last 4 candles of the break confirms the
+//      move was genuinely impulsive, not just a normal close above structure)
+// Only legs that pass both checks get a fib drawn - this matches the trader's exact
+// sweep -> reclaim -> impulsive FVG break -> HH/HL shift sequence.
+//   Point A (fib 0%)   = the high of the candle that is the FVG's impulsive (middle) candle
+//   Point B (fib 100%) = the low of the most recent swing low before that candle (the launch point)
 function detectStructureBreakFib(candles, side){
   const swingHighs = detectFractalHighs(candles, side);
   const swingLows = detectFractalLows(candles, side);
   if(!swingHighs.length || !swingLows.length) return null;
 
   const n = candles.length;
-  // walk forward through candles, tracking the most recent confirmed swing high.
-  // a "structure break" = a candle's CLOSE trades above that swing high's price.
-  let lastConfirmedHighIdx = -1;
-  let lastConfirmedHighPrice = -Infinity;
-  let breakCandle = null; // { breakIndex, structureHighPrice }
-
   const highsByIndex = {};
   swingHighs.forEach(h => { highsByIndex[h.index] = h.price; });
 
+  // collect EVERY structure break (not just the most recent), so we can FVG-check each one
+  const breaks = [];
+  let lastConfirmedHighIdx = -1;
+  let lastConfirmedHighPrice = -Infinity;
+
   for(let i=0;i<n;i++){
-    // a fractal high at i-side becomes "confirmed" once we've passed it (side candles later)
-    if(highsByIndex[i-side] !== undefined){
-      if(highsByIndex[i-side] > lastConfirmedHighPrice){
-        lastConfirmedHighPrice = highsByIndex[i-side];
-        lastConfirmedHighIdx = i-side;
-      }
+    if(highsByIndex[i-side] !== undefined && highsByIndex[i-side] > lastConfirmedHighPrice){
+      lastConfirmedHighPrice = highsByIndex[i-side];
+      lastConfirmedHighIdx = i-side;
     }
     if(lastConfirmedHighIdx === -1) continue;
     if(candles[i].c > lastConfirmedHighPrice && i > lastConfirmedHighIdx){
-      // structure break confirmed at candle i
-      breakCandle = { breakIndex: i, structureHighPrice: lastConfirmedHighPrice };
-      // keep scanning - we want the MOST RECENT break, so don't stop; but reset
-      // tracking so we find the next structure level after this break too.
+      breaks.push({ breakIndex: i, structureHighPrice: lastConfirmedHighPrice });
       lastConfirmedHighPrice = -Infinity;
       lastConfirmedHighIdx = -1;
     }
   }
+  if(!breaks.length) return null;
 
-  if(!breakCandle) return null;
+  // for each break, check if an FVG formed with its middle candle anywhere from the
+  // breakout candle itself through the next 3 candles (4 candles total)
+  function breakHasQualifyingFVG(breakIndex){
+    for(let mid = breakIndex; mid <= breakIndex+3 && mid < n; mid++){
+      if(hasFVGAtCandle(candles, mid)) return mid; // returns the FVG's middle candle index
+    }
+    return null;
+  }
 
-  // Point A: the high of the actual breakout candle (the wick that broke structure)
-  const breakoutCandle = candles[breakCandle.breakIndex];
-  const pointA = breakoutCandle.h;
-  const pointAIndex = breakCandle.breakIndex;
+  // walk backward from the most recent break to find the latest one that qualifies
+  let qualifying = null;
+  for(let bi = breaks.length-1; bi >= 0; bi--){
+    const fvgMidIndex = breakHasQualifyingFVG(breaks[bi].breakIndex);
+    if(fvgMidIndex != null){
+      qualifying = { breakIndex: breaks[bi].breakIndex, fvgMidIndex };
+      break;
+    }
+  }
+  if(!qualifying) return null; // no recent break left a qualifying FVG - don't draw a fib
 
-  // Point B: the low of the candle that started the impulsive move. We define this as
-  // the most recent swing low that occurred BEFORE the breakout candle.
-  const priorLows = swingLows.filter(l => l.index < pointAIndex);
+  // Point A: the high of the FVG's impulsive (middle) candle - this is "the wick that broke
+  // structure AND created the gap", matching the user's definition precisely.
+  const impulsiveCandle = candles[qualifying.fvgMidIndex];
+  const pointA = impulsiveCandle.h;
+  const pointAIndex = qualifying.fvgMidIndex;
+
+  // Point B: the low of the most recent swing low before the breakout (the launch point of the move)
+  const priorLows = swingLows.filter(l => l.index < qualifying.breakIndex);
   if(!priorLows.length) return null;
   const launchLow = priorLows[priorLows.length-1];
   const pointB = launchLow.price;
