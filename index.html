@@ -43,12 +43,14 @@
   #refreshBtn{
     background:none;border:1px solid var(--line);color:var(--text);
     font-family:var(--mono);font-size:11px;padding:6px 12px;border-radius:3px;
-    cursor:pointer;margin-top:6px;
+    cursor:pointer;
   }
   #refreshBtn:hover{border-color:var(--green);color:var(--green);}
   #refreshBtn:disabled{opacity:0.4;cursor:default;}
 
-  .tabs{display:flex;gap:6px;margin-bottom:16px;}
+  .toolbar{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap;}
+
+  .tabs{display:flex;gap:6px;}
   .tab{
     background:none;border:1px solid var(--line);color:var(--dim);
     font-family:var(--mono);font-size:11px;padding:6px 14px;border-radius:3px;
@@ -56,15 +58,14 @@
   }
   .tab.active{color:var(--bg);background:var(--green);border-color:var(--green);font-weight:700;}
 
-  .stats{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
-  .stat{
-    background:var(--panel);border:1px solid var(--line);border-radius:4px;
-    padding:10px 16px;flex:1;min-width:120px;
+  /* compact stats strip - this used to be three large boxes, which gave irrelevant
+     glance-once numbers far more visual weight than they deserved. Now it's a single
+     small inline line, de-emphasized, sitting next to the tabs/refresh button instead
+     of taking up its own full-width row. */
+  .stats-strip{
+    font-size:11px;color:var(--dim);letter-spacing:0.3px;margin-left:auto;
   }
-  .stat .num{font-size:22px;font-weight:700;}
-  .stat .lbl{font-size:10px;color:var(--dim);letter-spacing:0.5px;margin-top:2px;}
-  .stat.above .num{color:var(--green);}
-  .stat.below .num{color:var(--red);}
+  .stats-strip span{color:var(--green);font-weight:700;}
 
   table{width:100%;max-width:620px;border-collapse:collapse;font-size:13px;}
   thead th{
@@ -182,6 +183,25 @@
 
   footer{margin-top:24px;font-size:10px;color:var(--dim);line-height:1.6;}
 
+  /* collapsible below-EMA section - same <details> pattern as the legend, collapsed
+     by default since the user only wants to see above-EMA setups by default and
+     expand this on demand */
+  .below-ema-section{
+    margin-top:18px;border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);padding:2px 16px 16px;
+  }
+  .below-ema-section summary{
+    cursor:pointer;padding:12px 0;font-size:12px;color:var(--dim);
+    list-style:none;user-select:none;letter-spacing:0.3px;
+  }
+  .below-ema-section summary:hover{color:var(--text);}
+  .below-ema-section[open] summary{color:var(--red);}
+  .below-ema-section table{margin-top:8px;}
+
+  .empty-note{
+    text-align:center;color:var(--dim);font-size:11px;padding:18px 0!important;
+  }
+
   /* collapsible legend/glossary, collapsed by default via the <details> element's
      native behavior - no JS needed for the toggle itself */
   .legend-section{
@@ -286,19 +306,18 @@
     </div>
     <div class="meta">
       <div id="lastUpdated">—</div>
-      <button id="refreshBtn" onclick="loadAll()">↻ refresh</button>
     </div>
   </header>
 
-  <div class="tabs">
-    <button class="tab active" data-mkt="crypto" onclick="setMarket('crypto')">CRYPTO</button>
-    <button class="tab" data-mkt="stocks" onclick="setMarket('stocks')">STOCKS</button>
-  </div>
-
-  <div class="stats">
-    <div class="stat above"><div class="num" id="aboveCount">–</div><div class="lbl">ABOVE 200EMA</div></div>
-    <div class="stat below"><div class="num" id="belowCount">–</div><div class="lbl">BELOW 200EMA</div></div>
-    <div class="stat"><div class="num" id="totalCount">–</div><div class="lbl">TRACKED</div></div>
+  <div class="toolbar">
+    <button id="refreshBtn" onclick="loadAll()">↻ refresh</button>
+    <div class="tabs">
+      <button class="tab active" data-mkt="crypto" onclick="setMarket('crypto')">CRYPTO</button>
+      <button class="tab" data-mkt="stocks" onclick="setMarket('stocks')">STOCKS</button>
+    </div>
+    <div class="stats-strip">
+      <span id="aboveCount">–</span> above &nbsp;·&nbsp; <span id="totalCount">–</span> tracked
+    </div>
   </div>
 
   <div class="alert-panel">
@@ -843,33 +862,11 @@ function fmtPrice(p){
   return p.toFixed(6);
 }
 
-function render(){
-  const data = currentMarket === 'crypto' ? cryptoData : stockData;
-  const content = document.getElementById('content');
-  if(!data.length){
-    content.innerHTML = '<div class="err">no data loaded — check connection or refresh</div>';
-    return;
-  }
-  const sorted = [...data].sort((a,b)=>{
-    if(sortKey === 'symbol') return a.symbol.localeCompare(b.symbol)*sortDir*-1;
-    if(sortKey === 'distPct'){
-      // default view: above-EMA coins grouped first, below-EMA coins after, and within
-      // EACH group sorted by closest-to-EMA-distance at the top (using absolute distance
-      // so "closest" means smallest gap regardless of direction within that group)
-      if(a.above !== b.above) return a.above ? -1 : 1;
-      return Math.abs(a.distPct) - Math.abs(b.distPct);
-    }
-    return (a[sortKey]-b[sortKey])*sortDir;
-  });
-
-  const above = data.filter(d=>d.above).length;
-  document.getElementById('aboveCount').textContent = above;
-  document.getElementById('belowCount').textContent = data.length-above;
-  document.getElementById('totalCount').textContent = data.length;
-
-  const isApproxMarket = currentMarket === 'stocks';
-
-  let rows = sorted.map(d=>{
+// Builds the <tr> HTML for a list of coins. Extracted out of render() so the same
+// row markup can be reused for both the main (above-EMA) table and the collapsible
+// below-EMA section, without duplicating all the badge/dot/confluence logic twice.
+function buildRows(list){
+  return list.map(d=>{
     const rvol = d.relVol;
     const rvolHigh = rvol != null && rvol >= 1.5;
     const rvolBadge = rvol != null
@@ -941,25 +938,69 @@ function render(){
       <td class="swept-cell">${sweptLabel}</td>
     </tr>`;
   }).join('');
+}
 
+const TABLE_HEAD = `
+  <thead>
+    <tr>
+      <th class="col-symbol ${sortKey==='symbol'?'sorted':''}" onclick="sortBy('symbol')">SYMBOL</th>
+      <th class="col-dist ${sortKey==='distPct'?'sorted':''}" onclick="sortBy('distPct')">DIST % FROM 200EMA</th>
+      <th class="col-rvol">RVOL</th>
+      <th class="col-score ${sortKey==='scoreRank'?'sorted':''}" onclick="sortBy('scoreRank')">SCORE</th>
+      <th class="col-swept">SWEPT</th>
+    </tr>
+  </thead>`;
+
+function render(){
+  const data = currentMarket === 'crypto' ? cryptoData : stockData;
+  const content = document.getElementById('content');
+  if(!data.length){
+    content.innerHTML = '<div class="err">no data loaded — check connection or refresh</div>';
+    return;
+  }
+
+  // sort once, then split into above/below groups for the two separate tables -
+  // each group keeps its own internal closest-to-EMA-first ordering from the sort step
+  const sorted = [...data].sort((a,b)=>{
+    if(sortKey === 'symbol') return a.symbol.localeCompare(b.symbol)*sortDir*-1;
+    if(sortKey === 'distPct'){
+      // within each group (above/below are now rendered as separate tables, so this
+      // grouping no longer needs to interleave them), sort by closest-to-EMA-distance
+      // at the top using absolute distance
+      if(a.above !== b.above) return a.above ? -1 : 1;
+      return Math.abs(a.distPct) - Math.abs(b.distPct);
+    }
+    return (a[sortKey]-b[sortKey])*sortDir;
+  });
+
+  const aboveList = sorted.filter(d => d.above);
+  const belowList = sorted.filter(d => !d.above);
+
+  document.getElementById('aboveCount').textContent = aboveList.length;
+  document.getElementById('totalCount').textContent = data.length;
+
+  const isApproxMarket = currentMarket === 'stocks';
   const note = isApproxMarket
     ? `<div style="font-size:10px;color:var(--dim);margin-bottom:10px;">stocks: no free intraday 4H feed available client-side — showing <b>daily</b> closes vs daily-equivalent 200EMA as a trend proxy. chart view not available for stocks yet.</div>`
     : '';
 
+  const aboveRows = buildRows(aboveList);
+  const belowRows = buildRows(belowList);
+
   content.innerHTML = `
     ${note}
     <table>
-      <thead>
-        <tr>
-          <th class="col-symbol ${sortKey==='symbol'?'sorted':''}" onclick="sortBy('symbol')">SYMBOL</th>
-          <th class="col-dist ${sortKey==='distPct'?'sorted':''}" onclick="sortBy('distPct')">DIST % FROM 200EMA</th>
-          <th class="col-rvol">RVOL</th>
-          <th class="col-score ${sortKey==='scoreRank'?'sorted':''}" onclick="sortBy('scoreRank')">SCORE</th>
-          <th class="col-swept">SWEPT</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
+      ${TABLE_HEAD}
+      <tbody>${aboveRows || '<tr><td colspan="5" class="empty-note">no coins currently above their 4H 200EMA</td></tr>'}</tbody>
     </table>
+
+    <details class="below-ema-section">
+      <summary>below 200EMA (${belowList.length}) — click to expand</summary>
+      <table>
+        ${TABLE_HEAD}
+        <tbody>${belowRows || '<tr><td colspan="5" class="empty-note">no coins currently below their 4H 200EMA</td></tr>'}</tbody>
+      </table>
+    </details>
   `;
 }
 
