@@ -79,8 +79,23 @@
   th.col-rvol, td.rvol-cell{width:1%;}
   th.col-score, td.score-cell{width:1%;}
   th.col-swept, td.swept-cell{width:1%;}
-  tbody tr{border-bottom:1px solid var(--line);}
+  tbody tr{border-bottom:1px solid var(--line);position:relative;}
   tbody tr:hover{background:#0f1419;}
+
+  /* visual triage: a stronger row-level treatment for Excellent/Excellent+ setups so
+     they're visible while scanning the list, not just from the badge text. A left-edge
+     accent bar plus a faint background wash, with excellent_plus slightly stronger than
+     plain excellent. Kept subtle on purpose - not a flashing alert, just a nudge. */
+  tbody tr.row-highlight-excellent{
+    background:rgba(45,212,160,0.045);
+    box-shadow:inset 3px 0 0 0 rgba(45,212,160,0.5);
+  }
+  tbody tr.row-highlight-excellent:hover{background:rgba(45,212,160,0.08);}
+  tbody tr.row-highlight-excellent_plus{
+    background:rgba(45,212,160,0.08);
+    box-shadow:inset 3px 0 0 0 var(--green);
+  }
+  tbody tr.row-highlight-excellent_plus:hover{background:rgba(45,212,160,0.13);}
   td{padding:9px 14px 9px 10px;white-space:nowrap;}
   td.sym{font-weight:700;}
   td.num{text-align:right;font-variant-numeric:tabular-nums;}
@@ -166,6 +181,31 @@
   .err{color:var(--red);}
 
   footer{margin-top:24px;font-size:10px;color:var(--dim);line-height:1.6;}
+
+  /* collapsible legend/glossary, collapsed by default via the <details> element's
+     native behavior - no JS needed for the toggle itself */
+  .legend-section{
+    margin-top:18px;border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);padding:2px 16px;
+  }
+  .legend-section summary{
+    cursor:pointer;padding:12px 0;font-size:12px;color:var(--dim);
+    list-style:none;user-select:none;
+  }
+  .legend-section summary:hover{color:var(--text);}
+  .legend-section[open] summary{color:var(--green);}
+  .legend-body{padding:4px 0 18px;}
+  .legend-group{margin-bottom:18px;}
+  .legend-group:last-child{margin-bottom:4px;}
+  .legend-group h4{
+    font-size:11px;color:var(--text);margin:0 0 6px;letter-spacing:0.3px;
+    border-bottom:1px solid var(--line);padding-bottom:6px;
+  }
+  .legend-group p{
+    font-size:11px;color:var(--dim);line-height:1.6;margin:0 0 8px;
+  }
+  .legend-group p:last-child{margin-bottom:0;}
+  .legend-group p b{color:var(--text);font-weight:700;}
 
   ::-webkit-scrollbar{height:6px;width:6px;}
   ::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px;}
@@ -276,6 +316,64 @@
   <footer>
     4H closes only · EMA200 computed client-side from raw OHLC, seeded with a 1000-candle SMA warmup (Binance) for accuracy · crypto via Binance public API, stocks via Stooq daily-derived approx (see note on stocks tab) · this is a structural filter, not a signal — combine with HH/HL structure and liquidity sweep confirmation per your system.
   </footer>
+
+  <details class="legend-section">
+    <summary>what does this all mean? (click to expand)</summary>
+    <div class="legend-body">
+
+      <div class="legend-group">
+        <h4>The 4H 200 EMA</h4>
+        <p>Every coin's price is compared to its own 200-period EMA on the 4-hour timeframe. <b>ABOVE</b> means the last 4H close is trading above that line; <b>BELOW</b> means it's trading under it. On charts, the solid amber line is this EMA drawn natively on the 4H view; on the 12H/1D/3D/1W charts, the same 4H EMA value is shown as a dashed violet reference line so you can see where that level sits relative to higher-timeframe structure (it's hidden on the 4H chart itself since it would just duplicate the solid line).</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>Score: Bad / Good / Excellent / Excellent+</h4>
+        <p>The score combines two things: whether price is above or below the 4H 200EMA, and whether a structural low has been swept recently on the 4H, 12H, or 3D timeframe.</p>
+        <p><b>Bad</b> — price is below the 4H 200EMA and no recent sweep was found on any of the three timeframes.<br>
+        <b>Good</b> — price is below the 4H 200EMA, but a recent sweep was found.<br>
+        <b>Excellent</b> — price is above the 4H 200EMA, with a recent sweep on exactly one of 4H/12H/3D.<br>
+        <b>Excellent+</b> — price is above the 4H 200EMA, with a recent sweep on two or more of those timeframes at the same time — a stronger signal than just one lining up.</p>
+        <p>"Recent" has a strict, deliberately short window so the score doesn't light up on stale, irrelevant history: max 3 candles ago on 4H, max 1 candle ago on 12H, max 1 candle ago on 3D.</p>
+        <p>On top of that, distance from the EMA acts as a ceiling on the score, since this system never chases price. If price is more than 6% away from the 4H 200EMA, the score is capped at Bad no matter how clean the sweep looks. Between 2% and 6% away, the score is capped at Good at most. Within 2%, there's no cap and the sweep logic decides the tier freely. This cap only ever pulls a score down — it never raises one.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>DIST % FROM 200EMA and the small dot next to it</h4>
+        <p>How far the current price is from the 4H 200EMA, as a percentage. The tiny dot next to the number is a separate, independent indicator of how extended that distance is: dim/grey means tight (within 2%), amber means extended (2-8%), red means very extended (8%+, meaningful chasing risk). This dot uses its own thresholds and is shown regardless of what the score cap above decides.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>SWEPT column</h4>
+        <p>Shows which timeframe(s) had a qualifying recent sweep — 4H, 12H, 3D, or a combination like "4H+12H" if more than one lined up at once. The small "Xc ago" text next to it shows how many candles ago the freshest of those sweeps happened, on whichever timeframe it occurred on. A dash means no qualifying sweep was found on any timeframe.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>RVOL</h4>
+        <p>Relative volume: the current 4H candle's trading volume compared to the average of that same coin's previous 20 four-hour candles. 1.0x is normal for that coin; higher numbers (shown in amber once above 1.5x) mean unusually high participation on the current candle, which often adds weight to a sweep or breakout rather than it happening on thin, easily-reversed volume. This is a per-coin, per-candle read — not a comparison across different coins, and unrelated to the volume used to decide which 100 coins make this list in the first place.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>Funding rate and open interest — the small dot in the SCORE cell</h4>
+        <p>Where available (not every coin has a Binance futures contract), the small text next to the score badge shows that coin's current perpetual futures funding rate. Hovering the dot next to it also shows the 24-hour open interest change. Negative funding means short positions are paying long positions — a sign of crowded short positioning, which can be a contrarian-bullish tell that pairs naturally with this system's liquidity-sweep logic. The dot is colored green-ish when that contrarian read leans bullish, red-ish when it leans cautionary, and grey when it's roughly neutral or there's no data for that coin.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>Alerts</h4>
+        <p>The alert panel above the table can check, once per hour while this page stays open in a browser tab, whether any coin that was trading above its 4H 200EMA has come back down and touched it. When that happens, a browser notification fires (if permission was granted) and the event is logged below. The log persists across reloads on this device/browser, but alerts only run while the tab is actually open — they can't notify you if the page or browser is closed.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>Chart markers (inside a coin's chart popup)</h4>
+        <p>Green/red candle wicks show whether that candle closed above or below its own open. The horizontal markers mark out old swing lows where stop-loss liquidity tends to cluster: a grey dashed marker is a low that's never been touched (still "resting"), a blue marker means price swept below that low but hasn't closed back above it yet, and a thicker white marker means price swept below it and then closed back above it with a bullish candle — the sweep-and-reclaim pattern this whole system is built around hunting for.</p>
+      </div>
+
+      <div class="legend-group">
+        <h4>The watchlist itself</h4>
+        <p>This list isn't a fixed 100 coins — it's rebuilt from Binance's USDT pairs, ranked by 7-day average trading volume (not just the last 24 hours, which can be skewed by a single spike day), then filtered to only coins with at least $1B in market cap via CoinGecko, with known stablecoins excluded entirely. The goal is to keep the list to genuinely liquid, real assets rather than thin or wash-traded pairs.</p>
+      </div>
+
+    </div>
+  </details>
 
 </div>
 
@@ -827,8 +925,15 @@ function render(){
       confluenceHtml = `${fundingText}<span class="conf-dot ${tone}" title="${tooltipParts.join(' · ')}"></span>`;
     }
 
+    // visual triage: Excellent/Excellent+ rows get a stronger row-level highlight (not
+    // just the badge) so they catch the eye while scanning the list, without being loud
+    // enough to read as a warning/alert state. Bad/Good stay visually neutral.
+    const tierRowClass = score && (score.tier === 'excellent' || score.tier === 'excellent_plus')
+      ? `row-highlight-${score.tier}`
+      : '';
+
     return `
-    <tr class="clickable" onclick="openChart('${d.rawSymbol||d.symbol}')">
+    <tr class="clickable ${tierRowClass}" onclick="openChart('${d.rawSymbol||d.symbol}')">
       <td class="sym"><span class="strip ${d.above?'above':'below'}"></span>${d.symbol}</td>
       <td class="num pct ${d.distPct>=0?'pos':'neg'}">${d.distPct>=0?'+':''}${d.distPct.toFixed(2)}%${distDot}</td>
       <td class="num rvol-cell">${rvolBadge}</td>
