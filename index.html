@@ -65,7 +65,7 @@
   .stat.above .num{color:var(--green);}
   .stat.below .num{color:var(--red);}
 
-  table{width:100%;border-collapse:collapse;font-size:13px;}
+  table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
   thead th{
     text-align:left;font-size:10px;color:var(--dim);letter-spacing:0.6px;
     padding:6px 10px;border-bottom:1px solid var(--line);cursor:pointer;
@@ -73,11 +73,16 @@
   }
   thead th:hover{color:var(--text);}
   thead th.sorted{color:var(--green);}
+  th.col-symbol, td.sym{width:35%;}
+  th.col-dist, td.num{width:35%;}
+  th.col-status, td.status-cell{width:30%;}
   tbody tr{border-bottom:1px solid var(--line);}
   tbody tr:hover{background:#0f1419;}
   td{padding:9px 10px;white-space:nowrap;}
   td.sym{font-weight:700;}
   td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  th.col-dist{text-align:right;}
+  td.status-cell{text-align:right;}
   .pct{font-weight:700;}
   .pct.pos{color:var(--green);}
   .pct.neg{color:var(--red);}
@@ -124,7 +129,15 @@
   .modal-head{display:flex;align-items:baseline;gap:12px;margin-bottom:4px;}
   .modal-head .sym{font-size:18px;font-weight:700;}
   .modal-head .dist{font-size:12px;font-weight:700;}
-  .modal-sub{font-size:11px;color:var(--dim);margin-bottom:14px;}
+  .modal-sub{font-size:11px;color:var(--dim);margin-bottom:10px;}
+  .tf-row{display:flex;gap:6px;margin-bottom:14px;}
+  .tf-btn{
+    background:none;border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:3px;
+    cursor:pointer;letter-spacing:0.4px;
+  }
+  .tf-btn.active{color:var(--bg);background:var(--amber);border-color:var(--amber);font-weight:700;}
+  .tf-btn:disabled{opacity:0.4;cursor:default;}
   .legend{display:flex;gap:16px;font-size:10px;color:var(--dim);margin-top:8px;}
   .legend .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle;}
   .legend .dot.up{background:var(--green);}
@@ -175,6 +188,12 @@
       <div class="dist" id="modalDist"></div>
     </div>
     <div class="modal-sub" id="modalSub">4H · last 120 candles</div>
+    <div class="tf-row" id="tfRow">
+      <button class="tf-btn" data-tf="1h" onclick="switchTimeframe('1h')">1H</button>
+      <button class="tf-btn active" data-tf="4h" onclick="switchTimeframe('4h')">4H</button>
+      <button class="tf-btn" data-tf="1d" onclick="switchTimeframe('1d')">1D</button>
+      <button class="tf-btn" data-tf="1w" onclick="switchTimeframe('1w')">1W</button>
+    </div>
     <div id="chartArea"><div class="chart-loading">drawing chart…</div></div>
     <div class="legend">
       <span><span class="dot up"></span>close above open</span>
@@ -204,6 +223,9 @@ let cryptoData = [];
 let stockData = [];
 let sortKey = 'distPct';
 let sortDir = -1;
+let candleCache = {}; // key: SYMBOL_interval -> candles array
+let currentChartSymbol = null;
+let currentChartLabel = '';
 
 function ema(values, period){
   const k = 2/(period+1);
@@ -231,21 +253,27 @@ function emaSeriesFull(values, period){
   return out;
 }
 
-async function fetchBinance4h(symbol){
-  // 1000 candles of 4h history -> plenty of warmup for EMA200
-  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=4h&limit=1000`;
+async function fetchBinanceCandles(symbol, interval){
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=1000`;
   const res = await fetch(url);
   if(!res.ok) throw new Error('binance fetch failed '+symbol);
   const raw = await res.json();
   const closes = raw.map(c => parseFloat(c[4]));
-  const lastClose = closes[closes.length-1];
-  const prevClose = closes[closes.length-2];
-  const e = ema(closes, 200);
   const emaSeries = emaSeriesFull(closes, 200);
   const candles = raw.map((c,i)=>({
     t: c[0], o: parseFloat(c[1]), h: parseFloat(c[2]), l: parseFloat(c[3]), c: parseFloat(c[4]),
     ema: emaSeries[i]
   }));
+  return candles;
+}
+
+async function fetchBinance4h(symbol){
+  const candles = await fetchBinanceCandles(symbol, '4h');
+  const closes = candles.map(c=>c.c);
+  const lastClose = closes[closes.length-1];
+  const prevClose = closes[closes.length-2];
+  const e = ema(closes, 200);
+  candleCache[symbol+'_4h'] = candles;
   return {
     symbol: symbol.replace('USDT',''),
     rawSymbol: symbol,
@@ -334,7 +362,7 @@ function render(){
     <tr class="clickable" onclick="openChart('${d.rawSymbol||d.symbol}')">
       <td class="sym"><span class="strip ${d.above?'above':'below'}"></span>${d.symbol}</td>
       <td class="num pct ${d.distPct>=0?'pos':'neg'}">${d.distPct>=0?'+':''}${d.distPct.toFixed(2)}%</td>
-      <td><span class="badge ${d.above?'above':'below'}">${d.above?'ABOVE':'BELOW'}</span></td>
+      <td class="status-cell"><span class="badge ${d.above?'above':'below'}">${d.above?'ABOVE':'BELOW'}</span></td>
     </tr>
   `).join('');
 
@@ -347,9 +375,9 @@ function render(){
     <table>
       <thead>
         <tr>
-          <th onclick="sortBy('symbol')" class="${sortKey==='symbol'?'sorted':''}">SYMBOL</th>
-          <th onclick="sortBy('distPct')" class="${sortKey==='distPct'?'sorted':''}">DIST % FROM 200EMA</th>
-          <th>STATUS</th>
+          <th class="col-symbol ${sortKey==='symbol'?'sorted':''}" onclick="sortBy('symbol')">SYMBOL</th>
+          <th class="col-dist ${sortKey==='distPct'?'sorted':''}" onclick="sortBy('distPct')">DIST % FROM 200EMA</th>
+          <th class="col-status">STATUS</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -385,19 +413,55 @@ async function loadAll(){
   render();
 }
 
+const TF_LABELS = {'1h':'1H · last 120 candles','4h':'4H · last 120 candles','1d':'1D · last 120 candles','1w':'1W · last 120 candles'};
+const TF_BAR_COUNTS = {'1h':120,'4h':120,'1d':120,'1w':100};
+
 function openChart(rawSymbol){
   const item = cryptoData.find(d => d.rawSymbol === rawSymbol);
-  if(!item || !item.candles){
+  if(!item){
     return; // stocks have no chart data yet
   }
-  document.getElementById('modalSym').textContent = item.symbol + ' / USDT';
+  currentChartSymbol = rawSymbol;
+  currentChartLabel = item.symbol + ' / USDT';
+  document.getElementById('modalSym').textContent = currentChartLabel;
   const distEl = document.getElementById('modalDist');
-  distEl.textContent = (item.distPct>=0?'+':'') + item.distPct.toFixed(2) + '% from 200EMA';
+  distEl.textContent = (item.distPct>=0?'+':'') + item.distPct.toFixed(2) + '% from 200EMA (4H)';
   distEl.style.color = item.distPct>=0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('modalSub').textContent = '4H · last 120 candles';
-  document.getElementById('chartArea').innerHTML = '<canvas id="chartCanvas" height="360"></canvas>';
+  document.querySelectorAll('.tf-btn').forEach(b=>b.classList.toggle('active', b.dataset.tf==='4h'));
   document.getElementById('modalBg').classList.add('open');
-  requestAnimationFrame(() => drawChart(item.candles.slice(-120)));
+  renderTimeframe('4h', item.candles);
+}
+
+async function switchTimeframe(tf){
+  if(!currentChartSymbol) return;
+  document.querySelectorAll('.tf-btn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.tf===tf);
+    if(b.dataset.tf!==tf) b.disabled = true;
+  });
+  document.getElementById('modalSub').textContent = 'loading ' + tf.toUpperCase() + '…';
+  document.getElementById('chartArea').innerHTML = '<div class="chart-loading">pulling candles…</div>';
+
+  const cacheKey = currentChartSymbol + '_' + tf;
+  let candles = candleCache[cacheKey];
+  if(!candles){
+    try{
+      candles = await fetchBinanceCandles(currentChartSymbol, tf);
+      candleCache[cacheKey] = candles;
+    } catch(e){
+      document.getElementById('chartArea').innerHTML = '<div class="chart-loading">could not load this timeframe — try again</div>';
+      document.querySelectorAll('.tf-btn').forEach(b=>b.disabled=false);
+      return;
+    }
+  }
+  document.querySelectorAll('.tf-btn').forEach(b=>b.disabled=false);
+  renderTimeframe(tf, candles);
+}
+
+function renderTimeframe(tf, candles){
+  document.getElementById('modalSub').textContent = TF_LABELS[tf];
+  document.getElementById('chartArea').innerHTML = '<canvas id="chartCanvas" height="360"></canvas>';
+  const n = TF_BAR_COUNTS[tf] || 120;
+  requestAnimationFrame(() => drawChart(candles.slice(-n)));
 }
 
 function closeModal(){
@@ -490,9 +554,11 @@ function drawChart(candles){
   // time labels (first / mid / last)
   ctx.fillStyle = '#5c6e78';
   ctx.textAlign = 'center';
+  const showHour = (candles.length>1) && (candles[1].t - candles[0].t) < 24*60*60*1000;
   [0, Math.floor(n/2), n-1].forEach(i=>{
     const d = new Date(candles[i].t);
-    const label = d.getMonth()+1 + '/' + d.getDate();
+    let label = (d.getMonth()+1) + '/' + d.getDate();
+    if(showHour) label += ' ' + String(d.getHours()).padStart(2,'0') + 'h';
     ctx.fillText(label, xOf(i), cssHeight-6);
   });
 }
