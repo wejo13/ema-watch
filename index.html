@@ -145,6 +145,9 @@
   .legend .dot.down{background:var(--red);}
   .legend .dot.ema{background:var(--amber);border-radius:0;width:12px;height:2px;}
   .legend .dot.ema4h{background:var(--violet);border-radius:0;width:12px;height:2px;}
+  .legend .dot.resting{background:var(--dim);border-radius:0;width:10px;height:2px;}
+  .legend .dot.swept{background:#5aa9e6;border-radius:0;width:10px;height:2px;}
+  .legend .dot.reclaimed{background:#f4f4f4;border-radius:0;width:10px;height:2px;}
   #chartCanvas{width:100%;display:block;background:#0a0d0f;border-radius:4px;}
   .chart-loading{padding:60px;text-align:center;color:var(--dim);font-size:12px;}
 
@@ -164,9 +167,15 @@
     font-family:var(--mono);font-size:11px;padding:6px 12px;border-radius:3px;cursor:pointer;
   }
   #alertToggleBtn:hover{border-color:var(--violet);color:var(--violet);}
-  .alert-log{font-size:10px;color:var(--dim);margin-top:8px;max-height:90px;overflow-y:auto;}
+  .alert-log{font-size:10px;color:var(--dim);margin-top:8px;max-height:160px;overflow-y:auto;border-top:1px solid var(--line);padding-top:6px;}
   .alert-log div{padding:2px 0;}
   .alert-log .hit{color:var(--violet);}
+  .alert-log-empty{color:var(--dim);font-style:italic;}
+  #clearLogBtn{
+    background:none;border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:10px;padding:4px 9px;border-radius:3px;cursor:pointer;
+  }
+  #clearLogBtn:hover{border-color:var(--red);color:var(--red);}
 </style>
 </head>
 <body>
@@ -201,6 +210,7 @@
       <div class="alert-log" id="alertLog"></div>
     </div>
     <button id="alertToggleBtn" onclick="toggleAlerts()">enable alerts</button>
+    <button id="clearLogBtn" onclick="clearAlertLog()">clear log</button>
   </div>
 
   <div id="content"><div class="loading">loading 4H candles…</div></div>
@@ -230,8 +240,13 @@
     <div class="legend">
       <span><span class="dot up"></span>close above open</span>
       <span><span class="dot down"></span>close below open</span>
-      <span><span class="dot ema"></span>this timeframe's 200 EMA</span>
-      <span><span class="dot ema4h"></span>4H 200 EMA level</span>
+      <span><span class="dot ema"></span>4H 200 EMA (native, 4H chart only)</span>
+      <span><span class="dot ema4h"></span>4H 200 EMA level (reference, all TFs)</span>
+    </div>
+    <div class="legend" style="margin-top:6px;">
+      <span><span class="dot resting"></span>resting liquidity (untouched swing low)</span>
+      <span><span class="dot swept"></span>swept, not reclaimed</span>
+      <span><span class="dot reclaimed"></span>swept + reclaimed (bullish close above)</span>
     </div>
   </div>
 </div>
@@ -285,6 +300,50 @@ function emaSeriesFull(values, period){
     out[i] = prev;
   }
   return out;
+}
+
+// Detects fractal swing lows: a candle whose low is lower than the `side` candles
+// immediately before AND after it. This is where retail stop-losses cluster (liquidity).
+// For each detected low, also determines whether price has since swept below it and
+// reclaimed (closed back above it with a bullish candle) - the sweep+reclaim setup.
+function detectFractalLows(candles, side){
+  const lows = [];
+  const n = candles.length;
+  for(let i=side; i<n-side; i++){
+    const center = candles[i].l;
+    let isLow = true;
+    for(let j=i-side; j<=i+side; j++){
+      if(j===i) continue;
+      if(candles[j].l < center){ isLow = false; break; }
+    }
+    if(!isLow) continue;
+
+    // check what happened AFTER this fractal formed: did price sweep below it,
+    // then close back above it on a later candle (sweep + reclaim)?
+    let status = 'resting'; // never touched since forming
+    let sweepIndex = null;
+    for(let k=i+side+1; k<n; k++){
+      if(candles[k].l < center){
+        // price swept below the old low
+        // now look for a bullish candle that closes back above the level
+        if(candles[k].c > center && candles[k].c > candles[k].o){
+          status = 'swept_reclaimed';
+          sweepIndex = k;
+          break;
+        } else {
+          status = 'swept_open'; // swept but not yet reclaimed with a bullish close
+          sweepIndex = k;
+          // keep scanning forward in case a later candle reclaims it
+        }
+      } else if(status === 'swept_open' && candles[k].c > center && candles[k].c > candles[k].o){
+        status = 'swept_reclaimed';
+        sweepIndex = k;
+        break;
+      }
+    }
+    lows.push({ index: i, price: center, status, sweepIndex });
+  }
+  return lows;
 }
 
 async function fetchBinanceCandles(symbol, interval){
@@ -496,7 +555,7 @@ function renderTimeframe(tf, candles){
   document.getElementById('modalSub').textContent = TF_LABELS[tf];
   document.getElementById('chartArea').innerHTML = '<canvas id="chartCanvas" height="360"></canvas>';
   const n = TF_BAR_COUNTS[tf] || 120;
-  requestAnimationFrame(() => drawChart(candles.slice(-n), currentChart4hEma));
+  requestAnimationFrame(() => drawChart(candles.slice(-n), currentChart4hEma, tf));
 }
 
 function closeModal(){
@@ -505,7 +564,7 @@ function closeModal(){
 
 document.addEventListener('keydown', e => { if(e.key === 'Escape') closeModal(); });
 
-function drawChart(candles, ema4hLevel){
+function drawChart(candles, ema4hLevel, tf){
   const canvas = document.getElementById('chartCanvas');
   if(!canvas) return;
   const dpr = window.devicePixelRatio || 1;
@@ -522,9 +581,17 @@ function drawChart(candles, ema4hLevel){
   const w = cssWidth - padL - padR;
   const h = cssHeight - padT - padB;
 
+  const showNativeEma = (tf === '4h');
+  // fractal/liquidity detection only runs on 4H and higher timeframes — this is
+  // intentional: lower timeframes are too noisy to represent where real stop-loss
+  // liquidity clusters. Since 1H has been removed from this app, every available
+  // timeframe (4H/12H/1D/3D/1W) qualifies.
+  const FRACTAL_TIMEFRAMES = ['4h','12h','1d','3d','1w'];
+  const fractals = FRACTAL_TIMEFRAMES.includes(tf) ? detectFractalLows(candles, 3) : [];
+
   const highs = candles.map(c=>c.h);
   const lows = candles.map(c=>c.l);
-  const emaVals = candles.map(c=>c.ema).filter(v=>v!=null);
+  const emaVals = showNativeEma ? candles.map(c=>c.ema).filter(v=>v!=null) : [];
   const refVals = (ema4hLevel!=null) ? [ema4hLevel] : [];
   let max = Math.max(...highs, ...emaVals, ...refVals);
   let min = Math.min(...lows, ...emaVals, ...refVals);
@@ -574,18 +641,21 @@ function drawChart(candles, ema4hLevel){
     ctx.fillRect(x-bodyW/2, top, bodyW, bh);
   }
 
-  // ema line
-  ctx.strokeStyle = '#f0b429';
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  let started = false;
-  for(let i=0;i<n;i++){
-    if(candles[i].ema == null) continue;
-    const x = xOf(i), y = yOf(candles[i].ema);
-    if(!started){ ctx.moveTo(x,y); started = true; } else { ctx.lineTo(x,y); }
+  // ema line - only drawn on the 4H chart, since higher-TF EMA200 values
+  // (e.g. 12H/1D 200EMA) aren't meaningful to this system
+  if(showNativeEma){
+    ctx.strokeStyle = '#f0b429';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    let started = false;
+    for(let i=0;i<n;i++){
+      if(candles[i].ema == null) continue;
+      const x = xOf(i), y = yOf(candles[i].ema);
+      if(!started){ ctx.moveTo(x,y); started = true; } else { ctx.lineTo(x,y); }
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
   }
-  ctx.stroke();
-  ctx.lineWidth = 1;
 
   // 4H 200EMA reference line (dashed, violet) - shown on every timeframe for context
   if(ema4hLevel != null && ema4hLevel >= min && ema4hLevel <= max){
@@ -616,6 +686,39 @@ function drawChart(candles, ema4hLevel){
     if(showHour) label += ' ' + String(d.getHours()).padStart(2,'0') + 'h';
     ctx.fillText(label, xOf(i), cssHeight-6);
   });
+
+  // fractal swing lows = resting liquidity. drawn as short horizontal markers at the
+  // level itself, color-coded by status:
+  //   grey  = resting, never swept — liquidity still sitting there, untouched
+  //   blue  = swept but not yet reclaimed with a bullish close
+  //   white = swept AND reclaimed (bullish close back above) — the setup you're hunting
+  fractals.forEach(f=>{
+    if(f.price < min || f.price > max) return;
+    const y = yOf(f.price);
+    const xStart = xOf(f.index);
+    let color, label;
+    if(f.status === 'resting'){ color = '#5c6e78'; label = 'liquidity'; }
+    else if(f.status === 'swept_open'){ color = '#5aa9e6'; label = 'swept'; }
+    else { color = '#f4f4f4'; label = 'swept+reclaimed'; }
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = f.status === 'swept_reclaimed' ? 2 : 1.2;
+    ctx.setLineDash(f.status === 'resting' ? [2,3] : []);
+    ctx.beginPath();
+    const lineEnd = (f.status !== 'resting' && f.sweepIndex != null) ? xOf(f.sweepIndex) : (xStart + 26);
+    ctx.moveTo(xStart, y);
+    ctx.lineTo(Math.min(lineEnd, padL+w), y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // small marker dot at the fractal candle itself
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(xStart, y, f.status === 'swept_reclaimed' ? 3 : 2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  });
 }
 
 // ---- touch alert system ----
@@ -625,14 +728,44 @@ let alertsEnabled = false;
 let alertTimerId = null;
 let alertPrevState = {}; // symbol -> 'above' | 'touching' | 'below'
 
-function logAlert(msg, isHit){
+const ALERT_LOG_KEY = 'ema_watch_alert_log_v1';
+const MAX_LOG_ENTRIES = 200;
+
+function loadAlertLogFromStorage(){
+  try{
+    const raw = localStorage.getItem(ALERT_LOG_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+
+function saveAlertLogToStorage(entries){
+  try{
+    localStorage.setItem(ALERT_LOG_KEY, JSON.stringify(entries.slice(0, MAX_LOG_ENTRIES)));
+  } catch(e){ console.error('could not save alert log', e); }
+}
+
+function renderAlertLog(){
   const log = document.getElementById('alertLog');
-  const line = document.createElement('div');
-  if(isHit) line.className = 'hit';
-  const time = new Date().toLocaleTimeString();
-  line.textContent = `[${time}] ${msg}`;
-  log.prepend(line);
-  while(log.children.length > 12) log.removeChild(log.lastChild);
+  const entries = loadAlertLogFromStorage();
+  if(!entries.length){
+    log.innerHTML = '<div class="alert-log-empty">no alerts yet — history persists here across reloads on this device</div>';
+    return;
+  }
+  log.innerHTML = entries.map(e=>
+    `<div class="${e.hit?'hit':''}">[${e.time}] ${e.msg}</div>`
+  ).join('');
+}
+
+function clearAlertLog(){
+  saveAlertLogToStorage([]);
+  renderAlertLog();
+}
+
+function logAlert(msg, isHit){
+  const entries = loadAlertLogFromStorage();
+  entries.unshift({ time: new Date().toLocaleString(), msg, hit: isHit });
+  saveAlertLogToStorage(entries);
+  renderAlertLog();
 }
 
 function classifyTouch(candle, emaLevel){
@@ -644,7 +777,7 @@ function classifyTouch(candle, emaLevel){
 }
 
 async function checkTouchAlerts(){
-  logAlert('running hourly check…', false);
+  console.log('running hourly EMA touch check…');
   const updated = [];
   for(const symbol of CRYPTO_SYMBOLS){
     try{
@@ -710,6 +843,7 @@ async function toggleAlerts(){
 }
 
 loadAll();
+renderAlertLog();
 </script>
 </body>
 </html>
