@@ -200,7 +200,7 @@
   <header>
     <div>
       <div class="title">EMA<span>200</span>/4H WATCH</div>
-      <div class="subtitle">top 100 USDT pairs by 7-day avg volume · market structure context · 4H timeframe · setup score below</div>
+      <div class="subtitle">top 100 USDT pairs by 7-day avg volume, $1B+ market cap only · market structure context · 4H timeframe · setup score below</div>
     </div>
     <div class="meta">
       <div id="lastUpdated">—</div>
@@ -276,7 +276,7 @@ const FALLBACK_CRYPTO_SYMBOLS = [
   "HBARUSDT","UNIUSDT","AAVEUSDT","MKRUSDT","PEPEUSDT","WIFUSDT"
 ];
 
-const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v2_7davg';
+const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v3_mcap1b';
 const SYMBOL_LIST_CACHE_TTL = 24 * 60 * 60 * 1000; // re-rank once a day; otherwise reuse cached list
 
 let CRYPTO_SYMBOLS = FALLBACK_CRYPTO_SYMBOLS;
@@ -294,6 +294,12 @@ let CRYPTO_SYMBOLS = FALLBACK_CRYPTO_SYMBOLS;
 // and re-rank by that before keeping the top 100.
 const INITIAL_POOL_SIZE = 300;
 
+// Market cap floor (USD) - anything below this gets excluded even if volume looks high,
+// since volume alone can come from wash trading / pump-and-dump activity on low-quality
+// coins. $1B was chosen as a starting point per the user's request to "try under 1 bil
+// and see how many coins there are".
+const MARKET_CAP_FLOOR = 1_000_000_000;
+
 async function fetch7DayAvgVolume(symbol){
   const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=7`;
   const res = await fetch(url);
@@ -303,6 +309,33 @@ async function fetch7DayAvgVolume(symbol){
   // kline[7] is quote asset volume (USDT-denominated), the correct basis for ranking liquidity
   const totalQuoteVol = raw.reduce((sum,c) => sum + parseFloat(c[7]), 0);
   return totalQuoteVol / raw.length;
+}
+
+// Fetches market cap data from CoinGecko's public API (no key required) in bulk,
+// using /coins/markets which returns up to 250 coins per call - so the entire top
+// of the market fits in 1-2 requests rather than one call per symbol.
+// Returns a Map of UPPERCASE base-asset symbol -> market cap in USD.
+// Note: symbol collisions are possible (multiple coins can share a ticker, e.g. many
+// projects use "AI" or generic names) - when that happens we keep whichever has the
+// LARGER market cap, since that's almost certainly the "real" / intended asset.
+async function fetchMarketCapMap(){
+  const map = new Map();
+  for(const page of [1, 2]){ // 2 pages x 250 = top 500 coins by market cap, plenty of coverage
+    const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${page}&sparkline=false`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('coingecko fetch failed, page '+page);
+    const list = await res.json();
+    if(!Array.isArray(list) || !list.length) break;
+    list.forEach(coin => {
+      if(!coin.symbol || coin.market_cap == null) return;
+      const sym = coin.symbol.toUpperCase();
+      const existing = map.get(sym);
+      if(!existing || coin.market_cap > existing){
+        map.set(sym, coin.market_cap);
+      }
+    });
+  }
+  return map;
 }
 
 async function loadTop100SymbolsByVolume(){
@@ -340,13 +373,32 @@ async function loadTop100SymbolsByVolume(){
     settled.forEach(r => { if(r.status==='fulfilled') ranked.push(r.value); });
   }
   ranked.sort((a,b) => b.avgVol7d - a.avgVol7d);
-  const top100 = ranked.slice(0,100).map(r => r.symbol);
+
+  // market cap filter: pull CoinGecko data and drop anything under the floor, or
+  // anything we have no market cap data for at all (unmatched symbols are excluded
+  // rather than assumed to pass, since that would defeat the point of the filter)
+  let filtered = ranked;
+  try{
+    const mcapMap = await fetchMarketCapMap();
+    filtered = ranked.filter(r => {
+      const base = r.symbol.replace(/USDT$/, '');
+      const mcap = mcapMap.get(base);
+      return mcap != null && mcap >= MARKET_CAP_FLOOR;
+    });
+  } catch(e){
+    console.error('market cap filter failed, falling back to volume-only ranking', e);
+    // if CoinGecko is unreachable/rate-limited, fall back to the volume-only ranked
+    // list rather than failing the whole page - filtering is a nice-to-have, not critical
+    filtered = ranked;
+  }
+
+  const top100 = filtered.slice(0,100).map(r => r.symbol);
 
   try{
     localStorage.setItem(SYMBOL_LIST_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), symbols: top100 }));
   } catch(e){ /* storage full or unavailable, non-fatal */ }
 
-  return top100.length ? top100 : pool.slice(0,100); // fallback to 24h ranking if 7d step somehow yields nothing
+  return top100.length ? top100 : ranked.slice(0,100).map(r => r.symbol);
 }
 
 // Stocks: Stooq has no native 4H bars, so we build 4H bars from 1H data when available,
