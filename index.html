@@ -582,7 +582,7 @@
 
       <div class="legend-group">
         <h4>The watchlist itself</h4>
-        <p>This list isn't a fixed 100 coins — it's rebuilt from Binance's USDT pairs, ranked by 7-day average trading volume (not just the last 24 hours, which can be skewed by a single spike day), then filtered to only coins with at least $1B in market cap via CoinGecko, with known stablecoins excluded entirely. The goal is to keep the list to genuinely liquid, real assets rather than thin or wash-traded pairs.</p>
+        <p>This list isn't a fixed 100 coins — it's rebuilt from Binance's USDT pairs, ranked by 7-day average trading volume (not just the last 24 hours, which can be skewed by a single spike day), then filtered to only coins with at least $450M in market cap via CoinGecko, with known stablecoins excluded entirely. The goal is to keep the list to genuinely liquid, real assets rather than thin or wash-traded pairs.</p>
       </div>
 
       <div class="legend-group">
@@ -641,7 +641,7 @@ const FALLBACK_CRYPTO_SYMBOLS = [
   "HBARUSDT","UNIUSDT","AAVEUSDT","MKRUSDT","PEPEUSDT","WIFUSDT"
 ];
 
-const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v4_nostable';
+const SYMBOL_LIST_CACHE_KEY = 'ema_watch_top100_symbols_v5_nostable';
 const SYMBOL_LIST_CACHE_TTL = 24 * 60 * 60 * 1000; // re-rank once a day; otherwise reuse cached list
 
 let CRYPTO_SYMBOLS = FALLBACK_CRYPTO_SYMBOLS;
@@ -661,9 +661,9 @@ const INITIAL_POOL_SIZE = 300;
 
 // Market cap floor (USD) - anything below this gets excluded even if volume looks high,
 // since volume alone can come from wash trading / pump-and-dump activity on low-quality
-// coins. $1B was chosen as a starting point per the user's request to "try under 1 bil
-// and see how many coins there are".
-const MARKET_CAP_FLOOR = 1_000_000_000;
+// coins. Originally $1B, lowered to $450M per user request to widen the pool a bit
+// further down the market cap curve.
+const MARKET_CAP_FLOOR = 450_000_000;
 
 // Known stablecoins to exclude entirely - these trivially "trade above their 200EMA"
 // with meaningless sub-1% moves since they're pegged to $1, which pollutes the
