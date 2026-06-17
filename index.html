@@ -2172,11 +2172,16 @@ const JOURNAL_CHECK_LABELS = [
 
 function buildShareXDraft(e){
   const lines = [];
-  const dirLabel = e.direction === 'long' ? 'Long' : 'Short';
-  lines.push(`${dirLabel} ($${e.ticker})`);
+  const verbLabel = e.direction === 'long' ? 'Longed' : 'Shorted';
+  lines.push(`${verbLabel} $${e.ticker}`);
 
   const markedConfluences = JOURNAL_CHECK_LABELS.filter((label, i) => e.checks[i]);
-  lines.push(`Setup confluence: ${markedConfluences.length ? markedConfluences.join(', ') : 'none marked'}`);
+  if(markedConfluences.length){
+    lines.push('Setup confluence:');
+    markedConfluences.forEach(c => lines.push(`• ${c}`));
+  } else {
+    lines.push('Setup confluence: none marked');
+  }
 
   lines.push(`Entry price: ${e.entry != null ? e.entry : '\u2014'}`);
   lines.push(`Stoploss price: ${e.slPrice != null ? e.slPrice : '\u2014'}`);
