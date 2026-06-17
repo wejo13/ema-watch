@@ -337,6 +337,8 @@
   .jt-outcome-loss{color:var(--red);font-weight:700;}
   .jt-outcome-open{color:var(--amber);}
   .jt-outcome-breakeven{color:var(--dim);}
+  .jt-pct-pos{color:var(--green);font-weight:700;}
+  .jt-pct-neg{color:var(--red);font-weight:700;}
   .jt-delete-btn{
     background:none;border:1px solid var(--line);color:var(--dim);
     font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer;
@@ -348,6 +350,12 @@
     margin-right:4px;
   }
   .jt-share-btn:hover{border-color:var(--violet);color:var(--violet);}
+  .jt-edit-btn{
+    background:none;border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer;
+    margin-right:4px;
+  }
+  .jt-edit-btn:hover{border-color:var(--amber);color:var(--amber);}
   .journal-empty-note{text-align:center;color:var(--dim);font-size:11px;padding:16px 0;}
   .journal-storage-note{font-size:10px;color:var(--dim);margin-top:8px;}
   .journal-storage-note.storage-warn{color:var(--amber);}
@@ -500,7 +508,7 @@
         <div class="jf-row">
           <label>notional size ($)<input type="number" id="jf-notional" step="any" placeholder="e.g. 1000"></label>
           <label>SL amount ($)<input type="number" id="jf-sl-usd" step="any" placeholder="e.g. 20"></label>
-          <label>SL amount (%)<input type="number" id="jf-sl-pct" step="any" placeholder="e.g. 2"></label>
+          <label>SL price<input type="number" id="jf-sl-price" step="any" placeholder="e.g. 0.0598"></label>
         </div>
   
         <div class="jf-row">
@@ -533,6 +541,7 @@
   
         <div class="jf-actions">
           <button type="submit">log trade</button>
+          <button type="button" id="jf-cancel-edit-btn" onclick="cancelJournalEdit()" style="display:none;">cancel edit</button>
           <button type="button" onclick="exportJournalCSV()">export CSV</button>
           <button type="button" onclick="exportJournalJSON()">export JSON</button>
         </div>
@@ -544,8 +553,8 @@
           <thead>
             <tr>
               <th>date</th><th>ticker</th><th>dir</th><th>checks</th>
-              <th>notional</th><th>SL $</th><th>SL %</th>
-              <th>entry</th><th>exit</th><th>outcome</th><th>R</th><th>chart</th><th>notes</th><th></th>
+              <th>notional</th><th>SL $</th><th>SL price</th>
+              <th>entry</th><th>exit</th><th>outcome</th><th>R</th><th>result %</th><th>chart</th><th>notes</th><th></th>
             </tr>
           </thead>
           <tbody id="journalTableBody"></tbody>
@@ -2018,39 +2027,20 @@ function autofillJournalChecksFromTicker(){
   note.textContent = `checks 1-3 auto-filled from ${ticker}'s live data (${match.distPct>=0?'+':''}${match.distPct.toFixed(2)}% from EMA) - override any of them if needed`;
 }
 
-// Two-of-three auto-calc for notional/SL$/SL%: whichever field the user just edited,
-// fill in whichever of the other two is currently empty using the relationship
-// SL$ = notional * (SL% / 100). If both other fields already have values, we don't
-// overwrite either - the user can clear one manually if they want it recalculated.
-function handleJournalSizingInput(changedField){
-  const notionalEl = document.getElementById('jf-notional');
-  const slUsdEl = document.getElementById('jf-sl-usd');
-  const slPctEl = document.getElementById('jf-sl-pct');
-
-  const notional = parseFloat(notionalEl.value);
-  const slUsd = parseFloat(slUsdEl.value);
-  const slPct = parseFloat(slPctEl.value);
-
-  const hasNotional = !isNaN(notional) && notional > 0;
-  const hasSlUsd = !isNaN(slUsd) && slUsd > 0;
-  const hasSlPct = !isNaN(slPct) && slPct > 0;
-
-  // fill in whichever target field is empty, using the other two - but never
-  // overwrite the field the user is actively typing into (changedField), even if it
-  // happens to be empty mid-typing (e.g. they just cleared it to retype a new value)
-  if(changedField !== 'slPct' && hasNotional && hasSlUsd && !hasSlPct){
-    slPctEl.value = ((slUsd / notional) * 100).toFixed(3);
-  } else if(changedField !== 'slUsd' && hasNotional && hasSlPct && !hasSlUsd){
-    slUsdEl.value = (notional * (slPct / 100)).toFixed(2);
-  } else if(changedField !== 'notional' && hasSlUsd && hasSlPct && !hasNotional){
-    notionalEl.value = (slUsd / (slPct / 100)).toFixed(2);
-  }
+// Derives SL% from entry price and SL price - used to feed the existing R-multiple
+// formula, which is expressed in terms of percentage risk per unit rather than
+// requiring a separate price-based formula. Returns null if either input is missing
+// or if they're equal (zero risk, meaningless for R-multiple purposes).
+function deriveSlPctFromPrice(entry, slPrice){
+  if(entry == null || slPrice == null || entry <= 0) return null;
+  const pct = Math.abs(entry - slPrice) / entry * 100;
+  return pct > 0 ? pct : null;
 }
 
 // R-multiple: how many "stop-loss units" the realized profit/loss represents.
-// (exit - entry) / (entry - implied-stop-distance-from-SL%). We derive the per-unit
-// stop distance from SL% since that's always available once two of the three sizing
-// fields are filled, rather than requiring a separate explicit stop-price field.
+// (exit - entry) / (entry - implied-stop-distance-from-SL%). SL% itself is now
+// derived from entry price and the literal SL price field via deriveSlPctFromPrice,
+// rather than being typed in directly.
 function computeRMultiple(direction, entry, exit, slPct){
   if(!entry || !exit || !slPct) return null;
   const riskPerUnit = entry * (slPct/100);
@@ -2168,19 +2158,28 @@ function closeScreenshotModal(){
 // point for the share-to-X feature, never auto-posted. Kept factual and free of
 // hype/promises, since this is meant to genuinely reflect what happened on a trade
 // for self-reflection/teaching purposes, not to oversell a result.
+// Matches the 6 checkbox labels in the journal form exactly - used to turn the
+// boolean checks array on an entry into actual readable text for the share-to-X
+// draft, rather than just a count like "5/6".
+const JOURNAL_CHECK_LABELS = [
+  'price above 4H EMA',
+  'price not too far from EMA',
+  'swept liquidity',
+  'price making HHs and HLs',
+  'impulsive candle with FVG',
+  'retrace into OTE spot (fibs)'
+];
+
 function buildShareXDraft(e){
   const lines = [];
   const dirLabel = e.direction === 'long' ? 'Long' : 'Short';
-  lines.push(`${dirLabel} $${e.ticker}`);
+  lines.push(`${dirLabel} ($${e.ticker})`);
 
-  if(e.entry != null) lines.push(`Entry: ${e.entry}`);
-  if(e.exit != null) lines.push(`Exit: ${e.exit}`);
-  if(e.rMultiple != null) lines.push(`Result: ${e.rMultiple>=0?'+':''}${e.rMultiple.toFixed(2)}R`);
+  const markedConfluences = JOURNAL_CHECK_LABELS.filter((label, i) => e.checks[i]);
+  lines.push(`Setup confluence: ${markedConfluences.length ? markedConfluences.join(', ') : 'none marked'}`);
 
-  const checksPassedCount = e.checks.filter(Boolean).length;
-  lines.push(`Setup confluence: ${checksPassedCount}/6 checks`);
-
-  if(e.notes) lines.push('', e.notes);
+  lines.push(`Entry price: ${e.entry != null ? e.entry : '\u2014'}`);
+  lines.push(`Stoploss price: ${e.slPrice != null ? e.slPrice : '\u2014'}`);
 
   return lines.join('\n');
 }
@@ -2253,6 +2252,21 @@ function estimateJournalStorageUsage(){
   return kb;
 }
 
+// Plain percentage gain/loss on the trade itself, independent of stop-loss or
+// position sizing - this is the "how did the trade actually do" number, separate
+// from R-multiple (which measures performance relative to risk taken, not the raw
+// price move). Returns null until both entry and exit are filled in.
+function computePctResult(direction, entry, exit){
+  if(entry == null || exit == null || entry <= 0) return null;
+  const raw = direction === 'short' ? (entry - exit) / entry : (exit - entry) / entry;
+  return raw * 100;
+}
+
+// Tracks which entry (if any) is currently being edited, so submitJournalEntry
+// knows whether to update an existing entry in place or push a brand-new one.
+// Null means "creating a new entry" (the normal/default state).
+let journalEditingId = null;
+
 function submitJournalEntry(evt){
   evt.preventDefault();
 
@@ -2262,7 +2276,7 @@ function submitJournalEntry(evt){
   const direction = document.getElementById('jf-direction').value;
   const notional = parseFloat(document.getElementById('jf-notional').value) || null;
   const slUsd = parseFloat(document.getElementById('jf-sl-usd').value) || null;
-  const slPct = parseFloat(document.getElementById('jf-sl-pct').value) || null;
+  const slPrice = parseFloat(document.getElementById('jf-sl-price').value) || null;
   const entry = parseFloat(document.getElementById('jf-entry').value) || null;
   const exit = parseFloat(document.getElementById('jf-exit').value) || null;
   const outcome = document.getElementById('jf-outcome').value;
@@ -2270,25 +2284,87 @@ function submitJournalEntry(evt){
 
   const checks = [1,2,3,4,5,6].map(n => document.getElementById('jf-check-'+n).checked);
 
+  // SL% is derived from entry + SL price (not typed directly anymore), purely to
+  // feed the existing R-multiple formula - see deriveSlPctFromPrice
+  const slPct = deriveSlPctFromPrice(entry, slPrice);
   const rMultiple = computeRMultiple(direction, entry, exit, slPct);
+  const pctResult = computePctResult(direction, entry, exit);
 
   const entry_obj = {
-    id: Date.now() + '_' + Math.random().toString(36).slice(2,7),
+    id: journalEditingId || (Date.now() + '_' + Math.random().toString(36).slice(2,7)),
     datetime: document.getElementById('jf-datetime').value,
     ticker, direction, checks,
-    notional, slUsd, slPct, entry, exit, outcome,
-    rMultiple, notes,
+    notional, slUsd, slPrice, entry, exit, outcome,
+    rMultiple, pctResult, notes,
     screenshot: pendingScreenshotDataUrl || null
   };
 
-  journalEntries.push(entry_obj);
+  if(journalEditingId){
+    const idx = journalEntries.findIndex(e => e.id === journalEditingId);
+    if(idx !== -1) journalEntries[idx] = entry_obj;
+    else journalEntries.push(entry_obj); // entry was deleted mid-edit somehow - fall back to adding it
+  } else {
+    journalEntries.push(entry_obj);
+  }
+
   saveJournalEntries(journalEntries);
   renderJournalLog();
+  cancelJournalEdit();
+}
 
+// Resets the form back to "create new entry" mode - called after a successful
+// submit, and also available as an explicit "cancel edit" action so the user isn't
+// stuck mid-edit with no way out except submitting or refreshing the page.
+function cancelJournalEdit(){
+  journalEditingId = null;
   document.getElementById('journalForm').reset();
   setJournalDatetimeToNow();
   document.getElementById('jf-autofill-note').textContent = '';
   clearJournalScreenshotInput();
+  const submitBtn = document.querySelector('#journalForm button[type="submit"]');
+  if(submitBtn) submitBtn.textContent = 'log trade';
+  const cancelBtn = document.getElementById('jf-cancel-edit-btn');
+  if(cancelBtn) cancelBtn.style.display = 'none';
+}
+
+// Loads an existing entry's data back into the form for editing. Most useful for
+// filling in exit price/outcome after a trade closes, but every field is editable.
+function editJournalEntry(id){
+  const match = journalEntries.find(e => e.id === id);
+  if(!match) return;
+  journalEditingId = id;
+
+  document.getElementById('jf-datetime').value = match.datetime || '';
+  document.getElementById('jf-ticker').value = match.ticker || '';
+  document.getElementById('jf-direction').value = match.direction || 'long';
+  document.getElementById('jf-notional').value = match.notional ?? '';
+  document.getElementById('jf-sl-usd').value = match.slUsd ?? '';
+  document.getElementById('jf-sl-price').value = match.slPrice ?? '';
+  document.getElementById('jf-entry').value = match.entry ?? '';
+  document.getElementById('jf-exit').value = match.exit ?? '';
+  document.getElementById('jf-outcome').value = match.outcome || 'open';
+  document.getElementById('jf-notes').value = match.notes || '';
+  (match.checks || []).forEach((checked, i) => {
+    const el = document.getElementById('jf-check-' + (i+1));
+    if(el) el.checked = !!checked;
+  });
+
+  pendingScreenshotDataUrl = match.screenshot || null;
+  const previewWrap = document.getElementById('jf-screenshot-preview-wrap');
+  const previewImg = document.getElementById('jf-screenshot-preview');
+  if(match.screenshot && previewWrap && previewImg){
+    previewImg.src = match.screenshot;
+    previewWrap.style.display = '';
+  } else if(previewWrap){
+    previewWrap.style.display = 'none';
+  }
+
+  const submitBtn = document.querySelector('#journalForm button[type="submit"]');
+  if(submitBtn) submitBtn.textContent = 'update trade';
+  const cancelBtn = document.getElementById('jf-cancel-edit-btn');
+  if(cancelBtn) cancelBtn.style.display = '';
+
+  document.getElementById('journalForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function deleteJournalEntry(id){
@@ -2326,7 +2402,7 @@ function renderJournalLog(){
   renderJournalSummary();
 
   if(!journalEntries.length){
-    tbody.innerHTML = '<tr><td colspan="14" class="journal-empty-note">no trades logged yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="15" class="journal-empty-note">no trades logged yet</td></tr>';
     return;
   }
 
@@ -2338,6 +2414,9 @@ function renderJournalLog(){
     const dt = e.datetime ? e.datetime.replace('T',' ') : '—';
     const fmt = v => v == null ? '—' : v;
     const rText = e.rMultiple != null ? `${e.rMultiple>=0?'+':''}${e.rMultiple.toFixed(2)}` : '—';
+    const pctResultText = e.pctResult != null
+      ? `<span class="${e.pctResult>=0?'jt-pct-pos':'jt-pct-neg'}">${e.pctResult>=0?'+':''}${e.pctResult.toFixed(2)}%</span>`
+      : '—';
     const shotCell = e.screenshot
       ? `<img src="${e.screenshot}" onclick="openScreenshotModalForEntry('${e.id}')" alt="trade screenshot thumbnail">`
       : `<span class="no-shot">—</span>`;
@@ -2349,14 +2428,16 @@ function renderJournalLog(){
       <td title="${e.checks.map((c,i)=>`check ${i+1}: ${c?'✓':'✗'}`).join(', ')}">${checksPassedCount}/6</td>
       <td>${fmt(e.notional)}</td>
       <td>${fmt(e.slUsd)}</td>
-      <td>${e.slPct!=null?e.slPct+'%':'—'}</td>
+      <td>${fmt(e.slPrice)}</td>
       <td>${fmt(e.entry)}</td>
       <td>${fmt(e.exit)}</td>
       <td class="jt-outcome-${e.outcome}">${e.outcome}</td>
       <td>${rText}</td>
+      <td>${pctResultText}</td>
       <td class="shot-cell">${shotCell}</td>
       <td class="notes-cell">${e.notes ? e.notes.replace(/</g,'&lt;') : ''}</td>
       <td>
+        <button class="jt-edit-btn" onclick="editJournalEntry('${e.id}')" title="edit this trade, e.g. to fill in exit price">edit</button>
         <button class="jt-share-btn" onclick="openShareToXModal('${e.id}')" title="prepare a tweet about this trade">share</button>
         <button class="jt-delete-btn" onclick="deleteJournalEntry('${e.id}')">del</button>
       </td>
@@ -2377,12 +2458,13 @@ function exportJournalJSON(){
 function exportJournalCSV(){
   if(!journalEntries.length){ alert('no journal entries to export yet'); return; }
   const headers = ['datetime','ticker','direction','check1','check2','check3','check4','check5','check6',
-    'notional','slUsd','slPct','entry','exit','outcome','rMultiple','hasScreenshot','notes'];
+    'notional','slUsd','slPrice','entry','exit','outcome','rMultiple','pctResult','hasScreenshot','notes'];
   const rows = journalEntries.map(e => [
     e.datetime, e.ticker, e.direction,
     ...e.checks.map(c => c ? 'TRUE' : 'FALSE'),
-    e.notional ?? '', e.slUsd ?? '', e.slPct ?? '', e.entry ?? '', e.exit ?? '',
+    e.notional ?? '', e.slUsd ?? '', e.slPrice ?? '', e.entry ?? '', e.exit ?? '',
     e.outcome, e.rMultiple != null ? e.rMultiple.toFixed(3) : '',
+    e.pctResult != null ? e.pctResult.toFixed(3) : '',
     e.screenshot ? 'TRUE' : 'FALSE',
     (e.notes||'').replace(/"/g,'""')
   ]);
@@ -2401,13 +2483,6 @@ function initJournalForm(){
 
   const tickerInput = document.getElementById('jf-ticker');
   if(tickerInput) tickerInput.addEventListener('input', autofillJournalChecksFromTicker);
-
-  ['jf-notional','jf-sl-usd','jf-sl-pct'].forEach(id => {
-    const el = document.getElementById(id);
-    if(!el) return;
-    const fieldKey = id === 'jf-notional' ? 'notional' : (id === 'jf-sl-usd' ? 'slUsd' : 'slPct');
-    el.addEventListener('input', () => handleJournalSizingInput(fieldKey));
-  });
 
   const screenshotInput = document.getElementById('jf-screenshot-input');
   if(screenshotInput) screenshotInput.addEventListener('change', handleJournalScreenshotSelected);
