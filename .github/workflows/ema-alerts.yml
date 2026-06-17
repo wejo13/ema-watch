@@ -1,0 +1,36 @@
+name: EMA Touch Alerts
+
+on:
+  schedule:
+    # Runs every hour, on the hour, matching the same check frequency as the
+    # browser-based alert system in index.html. Cron is in UTC.
+    - cron: '0 * * * *'
+  workflow_dispatch: {} # allows manually triggering a run from the GitHub Actions tab, for testing
+
+jobs:
+  check-alerts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # needed to commit/push the updated alert_state.json back to the repo
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run alert check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node telegram-alerts/check_alerts.js
+
+      - name: Commit updated alert state
+        run: |
+          git config user.name "ema-watch-alerts-bot"
+          git config user.email "actions@github.com"
+          git add telegram-alerts/alert_state.json
+          git diff --quiet --cached || git commit -m "update alert state [skip ci]"
+          git push
