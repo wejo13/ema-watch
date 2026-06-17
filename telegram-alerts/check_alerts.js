@@ -14,14 +14,19 @@
 //   - ema() (EMA calculation)
 //   - classifyTouch() (above/touching/below classification)
 //
-// DELIBERATE DIFFERENCE from index.html: this script calls api.binance.us, not
-// api.binance.com. GitHub Actions runners run from US-based cloud-provider IP
-// ranges, and Binance's global API (.com) returns HTTP 451 "restricted location"
-// errors for those ranges - this doesn't affect index.html since browsers connect
-// from the user's own residential IP, not a datacenter. Binance.US has a smaller
-// symbol/trading-pair list than global Binance, so the watchlist built here may be
-// meaningfully smaller than the page's top-100 - that's an accepted tradeoff for
-// this to work at all from GitHub Actions, not a bug.
+// DELIBERATE DIFFERENCE from index.html: this script calls data-api.binance.vision,
+// not api.binance.com. GitHub Actions runners run from US-based cloud-provider IP
+// ranges, and Binance's main trading API (.com) returns HTTP 451 "restricted
+// location" errors for those ranges - this doesn't affect index.html since browsers
+// connect from the user's own residential IP, not a datacenter.
+// data-api.binance.vision is Binance's own officially-documented endpoint
+// specifically for public, read-only market data (no API key, no account access) -
+// it mirrors the same global symbol set as api.binance.com (unlike api.binance.us,
+// which is a separate, smaller regional exchange with its own listing process and
+// was tried first but only covered ~48 symbols vs the page's ~100). If this
+// endpoint also starts getting blocked from GitHub Actions in the future, the next
+// fallback to try is api.binance.us (smaller coverage but confirmed working), or
+// moving this script off GitHub Actions entirely to a host with a non-US IP.
 //
 // State between runs (GitHub Actions runs are stateless — no shared memory between
 // scheduled executions) is kept in alert_state.json, committed back to the repo by
@@ -59,7 +64,7 @@ const FALLBACK_CRYPTO_SYMBOLS = [
 ];
 
 async function fetch7DayAvgVolume(symbol){
-  const url = `https://api.binance.us/api/v3/klines?symbol=${symbol}&interval=1d&limit=7`;
+  const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=1d&limit=7`;
   const res = await fetch(url);
   if(!res.ok) throw new Error('7d volume fetch failed '+symbol);
   const raw = await res.json();
@@ -89,7 +94,7 @@ async function fetchMarketCapMap(){
 }
 
 async function loadTop100SymbolsByVolume(){
-  const res = await fetch('https://api.binance.us/api/v3/ticker/24hr');
+  const res = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr');
   if(!res.ok) throw new Error('ticker fetch failed');
   const all = await res.json();
 
@@ -150,7 +155,7 @@ function classifyTouch(candle, emaLevel){
 }
 
 async function fetch4hCandlesAndEma(symbol){
-  const url = `https://api.binance.us/api/v3/klines?symbol=${symbol}&interval=4h&limit=1000`;
+  const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=4h&limit=1000`;
   const res = await fetch(url);
   if(!res.ok) throw new Error('binance 4h fetch failed '+symbol);
   const raw = await res.json();
