@@ -4403,14 +4403,11 @@ async function gridHandleFill(order, clientIdx){
 }
 
 // ---- Order placement ----
-// Mirrors submitOrderToLighter exactly — OTO with entry leg + SL leg,
-// since that is the only pattern confirmed working with this SDK build.
-// SL is placed far out of range so it won't trigger during normal grid operation.
-async function gridPlaceSingleOrder(price, isAsk, notional, _clientOrderIdx){
+// Uses createOrderOptimized — single limit order, no grouping, no SL leg.
+async function gridPlaceSingleOrder(price, isAsk, notional, _unused){
   try{
     const signer = await window.__getLighterSigner();
     const SC = signer.constructor;
-    const GroupingType = window.__LighterGroupingType;
     const map = await fetchLighterMarketMap();
     const btcMarket = map ? (Object.values(map).find(m => m.marketIndex === GRID_BTC_MARKET)) : null;
     const priceDecimals = btcMarket ? btcMarket.priceDecimals : 2;
@@ -4419,13 +4416,9 @@ async function gridPlaceSingleOrder(price, isAsk, notional, _clientOrderIdx){
     const btcSize = notional / price;
     const priceLighter = toLighterInt(price, priceDecimals);
     const sizeLighter  = toLighterInt(btcSize, sizeDecimals);
-    const expiry = Date.now() + 28 * 24 * 60 * 60 * 1000;
 
-    // Dummy SL far from price: buy orders get SL at price*0.01, sell orders at price*100
-    const slPrice = isAsk ? price * 100 : price * 0.01;
-    const slPriceLighter = toLighterInt(slPrice, priceDecimals);
-
-    const entryLeg = {
+    console.log('[GridBot] placing order', { price, isAsk, btcSize, priceLighter, sizeLighter });
+    const [tx, hash, error] = await signer.createOrderOptimized({
       marketIndex: GRID_BTC_MARKET,
       clientOrderIndex: 0,
       baseAmount: sizeLighter,
@@ -4435,24 +4428,8 @@ async function gridPlaceSingleOrder(price, isAsk, notional, _clientOrderIdx){
       timeInForce: SC.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
       reduceOnly: false,
       triggerPrice: 0,
-      orderExpiry: expiry
-    };
-
-    const slLeg = {
-      marketIndex: GRID_BTC_MARKET,
-      clientOrderIndex: 0,
-      baseAmount: 0,
-      price: slPriceLighter,
-      isAsk: !isAsk,
-      orderType: SC.ORDER_TYPE_STOP_LOSS,
-      timeInForce: SC.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-      reduceOnly: true,
-      triggerPrice: slPriceLighter,
-      orderExpiry: expiry
-    };
-
-    console.log('[GridBot] placing order', { price, isAsk, btcSize, priceLighter, sizeLighter });
-    const [tx, hash, error] = await signer.createGroupedOrders(GroupingType.OTO, [entryLeg, slLeg]);
+      orderExpiry: Date.now() + 28 * 24 * 60 * 60 * 1000
+    });
     if(error){ console.error('[GridBot] order error', error); return false; }
     console.log('[GridBot] order placed', { tx, hash });
     return true;
@@ -4584,8 +4561,7 @@ async function gridBotStop(isSL){
     try{
       const signer = await window.__getLighterSigner();
       const SC = signer.constructor;
-      const GroupingType = window.__LighterGroupingType;
-      await signer.createGroupedOrders(GroupingType.OTO, [{
+      await signer.createOrderOptimized({
         marketIndex: GRID_BTC_MARKET,
         clientOrderIndex: 0,
         baseAmount: 0,
@@ -4596,7 +4572,7 @@ async function gridBotStop(isSL){
         reduceOnly: true,
         triggerPrice: 0,
         orderExpiry: 0
-      }]);
+      });
       console.log('[GridBot] market close sent');
     } catch(e){ console.warn('[GridBot] market close failed', e); }
   }
