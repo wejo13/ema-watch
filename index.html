@@ -4407,6 +4407,7 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
   try{
     const signer = await window.__getLighterSigner();
     const SC = signer.constructor;
+    const GroupingType = window.__LighterGroupingType;
     const map = await fetchLighterMarketMap();
     const btcMarket = map ? (Object.values(map).find(m => m.marketIndex === GRID_BTC_MARKET)) : null;
     const priceDecimals = btcMarket ? btcMarket.priceDecimals : 2;
@@ -4416,7 +4417,7 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
     const priceLighter = toLighterInt(price, priceDecimals);
     const sizeLighter  = toLighterInt(btcSize, sizeDecimals);
 
-    const [tx, hash, error] = await signer.createOrder({
+    const leg = {
       marketIndex: GRID_BTC_MARKET,
       clientOrderIndex: clientOrderIdx,
       baseAmount: sizeLighter,
@@ -4427,11 +4428,15 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
       reduceOnly: false,
       triggerPrice: 0,
       orderExpiry: Date.now() + 28 * 24 * 60 * 60 * 1000
-    });
-    if(error){ console.error('[GridBot] place order error', error); return false; }
+    };
+
+    console.log('[GridBot] placing order', { price, isAsk, btcSize, priceLighter, sizeLighter, clientOrderIdx });
+    const [tx, hash, error] = await signer.createGroupedOrders(GroupingType.OTO, [leg]);
+    if(error){ console.error('[GridBot] order error', error); return false; }
+    console.log('[GridBot] order placed', { tx, hash });
     return true;
   } catch(e){
-    console.error('[GridBot] place order exception', e);
+    console.error('[GridBot] order exception', e.message || e);
     return false;
   }
 }
@@ -4555,11 +4560,11 @@ async function gridBotStop(isSL){
   // Cancel all grid orders on Lighter + market close
   await gridCancelAllOrders();
   if(isSL){
-    // Market close position
     try{
       const signer = await window.__getLighterSigner();
       const SC = signer.constructor;
-      await signer.createOrder({
+      const GroupingType = window.__LighterGroupingType;
+      await signer.createGroupedOrders(GroupingType.OTO, [{
         marketIndex: GRID_BTC_MARKET,
         clientOrderIndex: 0,
         baseAmount: 0,
@@ -4570,7 +4575,7 @@ async function gridBotStop(isSL){
         reduceOnly: true,
         triggerPrice: 0,
         orderExpiry: 0
-      });
+      }]);
       console.log('[GridBot] market close sent');
     } catch(e){ console.warn('[GridBot] market close failed', e); }
   }
