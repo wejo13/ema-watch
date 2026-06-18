@@ -228,10 +228,27 @@
   }
   .grid-input:focus{border-color:var(--teal);}
   .grid-input::placeholder{color:var(--text-faint);}
-  .grid-leverage-info{font-size:10px;color:var(--text-faint);line-height:1.4;padding-bottom:2px;}
+  .grid-leverage-info{font-size:10px;color:var(--text-faint);line-height:1.4;margin-top:5px;}
   .grid-leverage-info strong{color:var(--teal);}
-  
-    border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.5;margin-bottom:12px;
+  .grid-leverage-slider{
+    -webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:var(--line-old);border-radius:2px;outline:none;cursor:pointer;
+  }
+  .grid-leverage-slider::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;
+    background:var(--teal);cursor:pointer;border:2px solid var(--bg);
+    box-shadow:0 0 0 2px var(--teal);
+  }
+  .grid-leverage-slider::-moz-range-thumb{
+    width:16px;height:16px;border-radius:50%;background:var(--teal);cursor:pointer;
+    border:2px solid var(--bg);box-shadow:0 0 0 2px var(--teal);
+  }
+  .grid-leverage-ticks{
+    display:flex;justify-content:space-between;
+    font-size:9px;color:var(--text-faint);margin-top:3px;
+  }
+  .grid-capital-check{
+    border-radius:6px;padding:7px 11px;font-size:11px;line-height:1.4;margin-bottom:10px;
   }
   .grid-capital-check.ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(61,220,151,0.25);}
   .grid-capital-check.warn{background:var(--red-dim);color:var(--red);border:1px solid rgba(226,100,95,0.25);}
@@ -1133,12 +1150,16 @@
                 <label class="grid-label">Notional per level <span class="grid-label-hint">$</span></label>
                 <input type="number" id="grid-notional" class="grid-input" placeholder="e.g. 200" step="10">
               </div>
-              <div class="grid-field">
-                <label class="grid-label">Leverage <span class="grid-label-hint">×</span></label>
-                <input type="number" id="grid-leverage" class="grid-input" value="50" min="1" max="50" step="1">
-              </div>
-              <div class="grid-field" style="display:flex;align-items:flex-end;">
-                <div class="grid-leverage-info">IMR = <strong id="grid-imr-display">2%</strong> · max 50×</div>
+              <div class="grid-field" style="grid-column:1/-1;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <label class="grid-label">Leverage</label>
+                  <span style="font-size:12px;font-weight:700;color:var(--teal);" id="grid-leverage-display">50×</span>
+                </div>
+                <input type="range" id="grid-leverage" class="grid-leverage-slider" min="1" max="50" step="1" value="50">
+                <div class="grid-leverage-ticks">
+                  <span>1×</span><span>10×</span><span>20×</span><span>30×</span><span>40×</span><span>50×</span>
+                </div>
+                <div class="grid-leverage-info">IMR = <strong id="grid-imr-display">2.0%</strong> · BTC max 50×</div>
               </div>
             </div>
 
@@ -4208,13 +4229,25 @@ function gridCheckCapital(){
   return true;
 }
 
-// wire up input listeners for capital check
+// wire up input listeners for capital check + slider label
 ['grid-lower','grid-upper','grid-levels','grid-notional','grid-leverage'].forEach(id => {
   const el = document.getElementById(id);
-  if(el) el.addEventListener('input', gridCheckCapital);
+  if(el) el.addEventListener('input', () => {
+    if(id === 'grid-leverage'){
+      const v = el.value;
+      const display = document.getElementById('grid-leverage-display');
+      if(display) display.textContent = v + '×';
+    }
+    gridCheckCapital();
+  });
 });
 
+// Start price feed immediately on load (always-on, not bot-dependent)
+gridStartPriceWs();
+gridFetchPriceFallback(); // REST fallback in case WS takes a moment
+
 // ---- Price WebSocket (public orderbook:0) ----
+// Always-on: starts on page load so price shows in viz even before bot starts
 function gridStartPriceWs(){
   if(gridPriceWs && gridPriceWs.readyState < 2) return;
   gridPriceWs = new WebSocket(GRID_WS_URL);
@@ -4224,24 +4257,36 @@ function gridStartPriceWs(){
   gridPriceWs.onmessage = (ev) => {
     try{
       const msg = JSON.parse(ev.data);
-      if(msg.channel === 'orderbook:0' && msg.data){
-        const d = msg.data;
-        // best bid + best ask midpoint
-        const bids = d.bids || d.b;
-        const asks = d.asks || d.a;
+      // channel may be 'orderbook:0' or the data may be nested differently
+      const ch = msg.channel || msg.type || '';
+      const d = msg.data || msg;
+      if(ch.includes('orderbook') || d.bids || d.asks || d.b || d.a){
+        // best bid + best ask midpoint — Lighter sends arrays of [price_int, size_int]
+        const bids = d.bids || d.b || [];
+        const asks = d.asks || d.a || [];
         let price = null;
-        if(bids && asks && bids.length && asks.length){
-          const bid = parseFloat(bids[0][0] ?? bids[0].p ?? bids[0]);
-          const ask = parseFloat(asks[0][0] ?? asks[0].p ?? asks[0]);
-          if(!isNaN(bid) && !isNaN(ask)) price = (bid + ask) / 2;
+        if(bids.length && asks.length){
+          // Entries can be [priceInt, sizeInt] arrays or objects with .price
+          const rawBid = Array.isArray(bids[0]) ? bids[0][0] : (bids[0].price ?? bids[0].p ?? bids[0]);
+          const rawAsk = Array.isArray(asks[0]) ? asks[0][0] : (asks[0].price ?? asks[0].p ?? asks[0]);
+          const btcMarketData = lighterMarketMap ? Object.values(lighterMarketMap).find(m => m.marketIndex === GRID_BTC_MARKET) : null;
+          const priceDecimals = btcMarketData ? btcMarketData.priceDecimals : 2;
+          // If the price looks like an integer (>1e6 for BTC), scale it down
+          let bid = parseFloat(rawBid);
+          let ask = parseFloat(rawAsk);
+          if(!isNaN(bid) && !isNaN(ask)){
+            if(bid > 1e6) { bid = bid / Math.pow(10, priceDecimals); }
+            if(ask > 1e6) { ask = ask / Math.pow(10, priceDecimals); }
+            price = (bid + ask) / 2;
+          }
         }
-        // fallback: last_price field
         if(price === null && d.last_price) price = parseFloat(d.last_price);
-        if(price !== null && !isNaN(price)){
+        if(price === null && d.mark_price) price = parseFloat(d.mark_price);
+        if(price !== null && !isNaN(price) && price > 1000){
           gridCurrentPrice = price;
           gridUpdateStat('gstat-price', '$' + price.toLocaleString('en-US',{maximumFractionDigits:1}));
           gridVizDirty = true;
-          // SL check
+          // SL check — only when bot is running
           if(gridState && gridState.running && !gridState.paused){
             const slLow  = gridState.lower * 0.995;
             const slHigh = gridState.upper * 1.005;
@@ -4253,14 +4298,33 @@ function gridStartPriceWs(){
           }
         }
       }
-    } catch(e){}
+    } catch(e){ console.warn('[GridBot] price WS parse error', e); }
   };
   gridPriceWs.onclose = () => {
-    if(gridState && gridState.running){
-      setTimeout(gridStartPriceWs, 3000);
-    }
+    // Always reconnect — we want price even without bot running
+    setTimeout(gridStartPriceWs, 3000);
   };
   gridPriceWs.onerror = () => { gridSetLiveDot('error'); };
+}
+
+// REST price fallback — fetch BTC mark price from Lighter REST API
+async function gridFetchPriceFallback(){
+  try{
+    const map = await fetchLighterMarketMap();
+    if(!map) return;
+    const res = await fetch(`${LIGHTER_BASE_URL}/api/v1/orderBooks`);
+    if(!res.ok) return;
+    const data = await res.json();
+    const btcBook = (data.order_books || []).find(ob => ob.market_id === GRID_BTC_MARKET);
+    if(btcBook){
+      const p = parseFloat(btcBook.mark_price || btcBook.last_price || 0);
+      if(p > 1000 && gridCurrentPrice === null){
+        gridCurrentPrice = p;
+        gridUpdateStat('gstat-price', '$' + p.toLocaleString('en-US',{maximumFractionDigits:1}));
+        gridVizDirty = true;
+      }
+    }
+  } catch(e){}
 }
 
 function gridStopPriceWs(){
@@ -4343,7 +4407,6 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
   try{
     const signer = await window.__getLighterSigner();
     const SC = signer.constructor;
-    const GroupingType = window.__LighterGroupingType;
     const map = await fetchLighterMarketMap();
     const btcMarket = map ? (Object.values(map).find(m => m.marketIndex === GRID_BTC_MARKET)) : null;
     const priceDecimals = btcMarket ? btcMarket.priceDecimals : 2;
@@ -4353,7 +4416,7 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
     const priceLighter = toLighterInt(price, priceDecimals);
     const sizeLighter  = toLighterInt(btcSize, sizeDecimals);
 
-    const leg = {
+    const [tx, hash, error] = await signer.createOrder({
       marketIndex: GRID_BTC_MARKET,
       clientOrderIndex: clientOrderIdx,
       baseAmount: sizeLighter,
@@ -4364,9 +4427,7 @@ async function gridPlaceSingleOrder(price, isAsk, notional, clientOrderIdx){
       reduceOnly: false,
       triggerPrice: 0,
       orderExpiry: Date.now() + 28 * 24 * 60 * 60 * 1000
-    };
-
-    const [tx, hash, error] = await signer.createGroupedOrders(GroupingType.NONE, [leg]);
+    });
     if(error){ console.error('[GridBot] place order error', error); return false; }
     return true;
   } catch(e){
@@ -4498,20 +4559,18 @@ async function gridBotStop(isSL){
     try{
       const signer = await window.__getLighterSigner();
       const SC = signer.constructor;
-      const GroupingType = window.__LighterGroupingType;
-      const closeLeg = {
+      await signer.createOrder({
         marketIndex: GRID_BTC_MARKET,
         clientOrderIndex: 0,
         baseAmount: 0,
         price: 0,
-        isAsk: false, // doesn't matter for market reduce-only
+        isAsk: false,
         orderType: SC.ORDER_TYPE_MARKET,
         timeInForce: SC.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
         reduceOnly: true,
         triggerPrice: 0,
         orderExpiry: 0
-      };
-      await signer.createGroupedOrders(GroupingType.NONE, [closeLeg]);
+      });
       console.log('[GridBot] market close sent');
     } catch(e){ console.warn('[GridBot] market close failed', e); }
   }
