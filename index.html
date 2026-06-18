@@ -228,7 +228,9 @@
   }
   .grid-input:focus{border-color:var(--teal);}
   .grid-input::placeholder{color:var(--text-faint);}
-  .grid-capital-check{
+  .grid-leverage-info{font-size:10px;color:var(--text-faint);line-height:1.4;padding-bottom:2px;}
+  .grid-leverage-info strong{color:var(--teal);}
+  
     border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.5;margin-bottom:12px;
   }
   .grid-capital-check.ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(61,220,151,0.25);}
@@ -1130,6 +1132,13 @@
               <div class="grid-field">
                 <label class="grid-label">Notional per level <span class="grid-label-hint">$</span></label>
                 <input type="number" id="grid-notional" class="grid-input" placeholder="e.g. 200" step="10">
+              </div>
+              <div class="grid-field">
+                <label class="grid-label">Leverage <span class="grid-label-hint">×</span></label>
+                <input type="number" id="grid-leverage" class="grid-input" value="50" min="1" max="50" step="1">
+              </div>
+              <div class="grid-field" style="display:flex;align-items:flex-end;">
+                <div class="grid-leverage-info">IMR = <strong id="grid-imr-display">2%</strong> · max 50×</div>
               </div>
             </div>
 
@@ -4154,7 +4163,14 @@ function gridCheckCapital(){
   const upper = parseFloat(document.getElementById('grid-upper').value);
   const levels = parseInt(document.getElementById('grid-levels').value);
   const notional = parseFloat(document.getElementById('grid-notional').value);
+  const leverage = parseFloat(document.getElementById('grid-leverage').value) || 50;
   const el = document.getElementById('grid-capital-check');
+
+  // Update IMR display (BTC IMR = 1/leverage, min 2% at 50x per Lighter docs)
+  const imr = Math.max(1 / leverage, 0.02);
+  const imrEl = document.getElementById('grid-imr-display');
+  if(imrEl) imrEl.textContent = (imr * 100).toFixed(1) + '%';
+
   if(!el) return true;
   if(isNaN(lower)||isNaN(upper)||isNaN(levels)||isNaN(notional)||levels<2){
     el.style.display = 'none'; return false;
@@ -4169,29 +4185,31 @@ function gridCheckCapital(){
     if(m) available = parseFloat(m[1].replace(/,/g,''));
   }
 
-  const required = (levels * notional) * 1.05; // 5% buffer
+  // Required margin = total notional × IMR × 1.05 buffer
+  const totalNotional = levels * notional;
+  const required = totalNotional * imr * 1.05;
   el.style.display = 'block';
 
   if(available === null){
     el.className = 'grid-capital-check ok';
-    el.innerHTML = `Required capital: <strong>~$${required.toLocaleString('en-US',{maximumFractionDigits:0})}</strong> (${levels} levels × $${notional} + 5% buffer). Connect Lighter to validate against balance.`;
+    el.innerHTML = `Required margin: <strong>~$${required.toLocaleString('en-US',{maximumFractionDigits:2})}</strong> ($${totalNotional.toLocaleString()} notional × ${(imr*100).toFixed(1)}% IMR + 5% buffer). Connect Lighter to validate.`;
     return true;
   }
 
   if(required > available){
-    const maxNotional = Math.floor((available * 0.95) / levels);
+    const maxNotional = Math.floor((available * 0.95) / (levels * imr));
     el.className = 'grid-capital-check warn';
-    el.innerHTML = `Not possible — requires <strong>$${required.toLocaleString('en-US',{maximumFractionDigits:0})}</strong> but only <strong>$${available.toLocaleString('en-US',{maximumFractionDigits:0})}</strong> available.<br>Max notional per level: <strong>$${maxNotional.toLocaleString('en-US',{maximumFractionDigits:0})}</strong>`;
+    el.innerHTML = `Not possible — requires <strong>$${required.toLocaleString('en-US',{maximumFractionDigits:2})}</strong> margin but only <strong>$${available.toLocaleString('en-US',{maximumFractionDigits:0})}</strong> available.<br>Max notional per level: <strong>$${maxNotional.toLocaleString('en-US',{maximumFractionDigits:0})}</strong>`;
     return false;
   }
 
   el.className = 'grid-capital-check ok';
-  el.innerHTML = `✓ Capital OK — requires <strong>$${required.toLocaleString('en-US',{maximumFractionDigits:0})}</strong>, available <strong>$${available.toLocaleString('en-US',{maximumFractionDigits:0})}</strong>`;
+  el.innerHTML = `✓ Margin OK — requires <strong>$${required.toLocaleString('en-US',{maximumFractionDigits:2})}</strong> of $${available.toLocaleString('en-US',{maximumFractionDigits:0})} available ($${totalNotional.toLocaleString()} notional × ${(imr*100).toFixed(1)}% IMR)`;
   return true;
 }
 
 // wire up input listeners for capital check
-['grid-lower','grid-upper','grid-levels','grid-notional'].forEach(id => {
+['grid-lower','grid-upper','grid-levels','grid-notional','grid-leverage'].forEach(id => {
   const el = document.getElementById(id);
   if(el) el.addEventListener('input', gridCheckCapital);
 });
@@ -4374,6 +4392,7 @@ async function gridBotStart(){
   const upper   = parseFloat(document.getElementById('grid-upper').value);
   const nLevels = parseInt(document.getElementById('grid-levels').value);
   const notional= parseFloat(document.getElementById('grid-notional').value);
+  const leverage= parseFloat(document.getElementById('grid-leverage').value) || 50;
 
   if(isNaN(lower)||isNaN(upper)||isNaN(nLevels)||isNaN(notional)){
     gridToast('Fill in all fields before starting.'); return;
@@ -4396,7 +4415,7 @@ async function gridBotStart(){
   }
 
   gridState = {
-    lower, upper, nLevels, notional,
+    lower, upper, nLevels, notional, leverage,
     levels, running: true, paused: false,
     startTime: Date.now(), fillCount: 0, pnl: 0
   };
@@ -4689,6 +4708,7 @@ function gridDrawViz(){
   document.getElementById('grid-upper').value    = saved.upper || '';
   document.getElementById('grid-levels').value   = saved.nLevels || '';
   document.getElementById('grid-notional').value = saved.notional || '';
+  document.getElementById('grid-leverage').value = saved.leverage || 50;
 
   if(saved.running){
     gridSetBadge(saved.paused ? 'paused' : 'running');
