@@ -4468,12 +4468,24 @@ async function gridPlaceSingleOrder(price, isAsk, notional, _unused){
 
 async function gridCancelAllOrders(){
   try{
+    // Fetch active orders directly from REST API
+    const res = await fetch(`${LIGHTER_BASE_URL}/api/v1/accountActiveOrders?account_index=${LIGHTER_ACCOUNT_INDEX}`);
+    const data = await res.json();
+    const orders = data.orders || [];
+    console.log('[GridBot] cancelling', orders.length, 'orders');
+
+    // Cancel each via WASM signer
     const signer = await window.__getLighterSigner();
-    // cancelAllOrders via the REST orderApi — cancels all open orders account-wide
-    const result = await signer.orderApi.cancelAllOrders();
-    console.log('[GridBot] all orders cancelled', result);
+    for(const order of orders){
+      const orderIndex = order.order_index ?? order.orderIndex ?? order.index;
+      const marketIndex = order.market_index ?? order.marketIndex ?? order.market_id;
+      if(orderIndex === undefined || marketIndex === undefined){ console.warn('[GridBot] skip order missing index', order); continue; }
+      const [, , err] = await signer.cancelOrder({ marketIndex, orderIndex });
+      if(err) console.warn('[GridBot] cancel failed', orderIndex, err);
+      else console.log('[GridBot] cancelled', orderIndex);
+    }
   } catch(e){
-    console.warn('[GridBot] cancel all orders failed:', e.message || e);
+    console.warn('[GridBot] gridCancelAllOrders error:', e.message || e);
   }
 }
 
