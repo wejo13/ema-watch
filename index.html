@@ -150,6 +150,17 @@
   .dist-tier-dot.extended{background:var(--amber);opacity:0.6;}
   .dist-tier-dot.very_extended{background:var(--red);opacity:0.7;}
 
+  /* flags rows where the 4H 200EMA hasn't matured yet (fewer than 200 real 4H
+     candles available) - mainly relevant for newly-listed RWA stock markets on
+     Lighter, where DIST% and score can be wildly misleading until enough history
+     exists. Sits right next to the symbol so it's seen before the (possibly bogus)
+     numbers further down the row. */
+  .immature-badge{
+    font-size:8px;font-weight:700;color:var(--amber);border:1px solid rgba(240,180,41,0.4);
+    border-radius:3px;padding:1px 4px;margin-left:6px;letter-spacing:0.3px;cursor:help;
+    vertical-align:middle;
+  }
+
   /* funding rate now has its own column (FUNDING) rather than sitting inline next
      to the score badge - OI delta stays tucked into the dot's tooltip alongside it */
   .funding-text{
@@ -1336,6 +1347,8 @@ async function fetchBybit4h(symbol, fundingMap){
     scoreRank: SCORE_RANK[score.tier],
     fundingRate: fundingInfo ? fundingInfo.fundingRate : null,
     oiDeltaPct: oiDelta ? oiDelta.deltaPct : null,
+    barsAvailable: candles.length,
+    insufficientHistory: candles.length < 200,
     candles
   };
 }
@@ -1467,6 +1480,8 @@ async function fetchLighterStock(symbol, marketId){
     scoreRank: SCORE_RANK[score.tier],
     fundingRate: null,
     oiDeltaPct: null,
+    barsAvailable: candles.length,
+    insufficientHistory: candles.length < 200,
     candles
   };
 }
@@ -1617,10 +1632,18 @@ function buildRows(list){
       ? `row-highlight-${score.tier}`
       : '';
 
+    // flags symbols whose 4H 200EMA isn't trustworthy yet - fewer than 200 real 4H
+    // candles means the EMA is still converging, so DIST% and score can be way off
+    // (e.g. BOT showing +108% on a freshly-listed RWA market). Sits in the symbol
+    // cell, before DIST%/SCORE, so it's seen first.
+    const immatureBadge = d.insufficientHistory
+      ? `<span class="immature-badge" title="only ${d.barsAvailable} of 200 4H candles available - EMA/score not yet reliable">LOW HIST</span>`
+      : '';
+
     return `
     <tr class="clickable ${tierRowClass}" onclick="openChart('${d.rawSymbol||d.symbol}')">
       <td class="sym">
-        <span class="strip ${d.above?'above':'below'}"></span>${d.symbol}
+        <span class="strip ${d.above?'above':'below'}"></span>${d.symbol}${immatureBadge}
         <a href="${tradingViewUrl(d.rawSymbol||d.symbol, currentMarket)}" target="_blank" rel="noopener" class="tv-link" title="open in TradingView" onclick="event.stopPropagation()">TV↗</a>
       </td>
       <td class="num pct ${d.distPct>=0?'pos':'neg'}">${d.distPct>=0?'+':''}${d.distPct.toFixed(2)}%${distDot}</td>
