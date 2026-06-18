@@ -659,6 +659,12 @@
               <span class="sl-badge">OCO</span>
             </div>
 
+            <div class="exec-slippage-row" id="exec-entry-slippage-row">
+              <label><input type="checkbox" id="exec-entry-slippage-enabled" checked> entry slippage tolerance</label>
+              <input type="number" id="exec-entry-slippage-pct" step="any" value="0.5">%
+            </div>
+            <div class="exec-slippage-note">market orders only · worst acceptable price vs current price · default 0.5%</div>
+
             <div class="exec-slippage-row">
               <label><input type="checkbox" id="exec-slippage-enabled" checked> SL slippage tolerance</label>
               <input type="number" id="exec-slippage-pct" step="any" value="0.5">%
@@ -2952,6 +2958,11 @@ function setExecOrderType(type){
   document.getElementById('exec-type-limit').classList.toggle('active', type === 'limit');
   document.getElementById('exec-limit-price').disabled = (type === 'market');
   if(type === 'market') document.getElementById('exec-limit-price').value = '';
+  // entry slippage tolerance only applies to market orders - for limit orders the
+  // limit price itself already is the worst acceptable price, so this row is moot
+  document.getElementById('exec-entry-slippage-enabled').disabled = (type === 'limit');
+  document.getElementById('exec-entry-slippage-pct').disabled = (type === 'limit');
+  document.getElementById('exec-entry-slippage-row').style.opacity = (type === 'limit') ? '0.4' : '1';
   clearExecValidationMsg();
 }
 
@@ -3015,11 +3026,13 @@ function closeExecTickerModal(){
   document.getElementById('exec-ticker-modal-overlay').style.display = 'none';
 }
 
-// Validates just enough to keep the stub from logging an obviously incomplete
-// order - ticker, size, and SL price are required regardless of order type;
-// limit orders additionally require a limit price. Returns true if valid.
+// Validates just enough to keep the order from being submitted obviously
+// incomplete or with a bogus slippage reference - ticker, size, and SL price are
+// required regardless of order type; limit orders additionally require a limit
+// price; market orders need the ticker resolvable in a live watchlist so the
+// slippage cap can be anchored to a real current price, not a guess.
 function validateExecFields(){
-  const ticker = document.getElementById('jf-ticker').value.trim();
+  const ticker = document.getElementById('jf-ticker').value.trim().toUpperCase();
   const size = document.getElementById('exec-size').value;
   const slPrice = document.getElementById('exec-sl-price').value;
   const limitPrice = document.getElementById('exec-limit-price').value;
@@ -3031,14 +3044,19 @@ function validateExecFields(){
     showExecValidationMsg('limit price is required for limit orders');
     return false;
   }
+  if(execOrderType === 'market'){
+    const liveMatch = cryptoData.find(d => d.symbol === ticker) || stockData.find(d => d.symbol === ticker);
+    if(!liveMatch){
+      showExecValidationMsg(`"${ticker}" isn't loaded in the current watchlist - can't anchor market order slippage to a live price. Refresh the watchlist, or use a limit order instead.`);
+      return false;
+    }
+  }
   clearExecValidationMsg();
   return true;
 }
 
-// Builds the stub request object and logs it. market_index, base_amount, and
-// price are now resolved for real via the live orderBooks lookup. Still a stub:
-// no signing, no actual order-placement network call to Lighter yet - that's
-// the separate WASM signer integration step.
+// Builds the order request and submits it for real signing via the WASM signer.
+// market_index, base_amount, and price are resolved via the live orderBooks lookup.
 function placeOnLighter(){
   if(!validateExecFields()) return;
 
@@ -3049,6 +3067,8 @@ function placeOnLighter(){
   const slippageEnabled = document.getElementById('exec-slippage-enabled').checked;
   const slippagePct = parseFloat(document.getElementById('exec-slippage-pct').value) || 0;
   const limitPrice = execOrderType === 'limit' ? parseFloat(document.getElementById('exec-limit-price').value) : null;
+  const entrySlippageEnabled = document.getElementById('exec-entry-slippage-enabled').checked;
+  const entrySlippagePct = parseFloat(document.getElementById('exec-entry-slippage-pct').value) || 0;
 
   const market = resolveLighterMarket(ticker);
   if(!market){
@@ -3057,9 +3077,36 @@ function placeOnLighter(){
     return;
   }
 
-  // entry price used for scaling: limit price if set, else SL price as a stand-in
-  // reference (market orders don't have a fixed entry price ahead of execution)
-  const referencePrice = limitPrice !== null ? limitPrice : slPrice;
+  // For market orders, Lighter's `price` field is NOT a fill price - per their own
+  // docs/SDK reference it's the worst acceptable execution price (slippage cap vs
+  // the live market), independent of where the SL sits. Using SL price here was the
+  // bug that got an order auto-cancelled for "excessive slippage" - SL can sit far
+  // from the live price by design, so anchoring the entry's slippage cap to it was
+  // never correct. The live last price comes from whichever watchlist (crypto or
+  // stocks) currently has this ticker loaded - same lookup pattern already used by
+  // autofillJournalChecksFromTicker.
+  const liveMatch = cryptoData.find(d => d.symbol === ticker) || stockData.find(d => d.symbol === ticker);
+  const livePrice = liveMatch ? liveMatch.price : null;
+
+  let referencePrice;
+  if(limitPrice !== null){
+    // limit orders: the limit price itself already IS the worst acceptable price
+    referencePrice = limitPrice;
+  } else if(livePrice != null){
+    // market orders: worst acceptable price = live price +/- entry slippage tolerance,
+    // direction-aware (a long's worst case is paying MORE, a short's worst case is
+    // receiving LESS)
+    const entrySlippageFraction = entrySlippageEnabled ? entrySlippagePct / 100 : 0;
+    referencePrice = direction === 'short'
+      ? livePrice * (1 - entrySlippageFraction)
+      : livePrice * (1 + entrySlippageFraction);
+  } else {
+    // fallback if this ticker isn't currently loaded in either watchlist (e.g. typed
+    // manually, watchlist not yet refreshed) - SL price as a last resort, same as
+    // the old behavior, rather than failing outright
+    referencePrice = slPrice;
+  }
+
   const slippageFraction = slippageEnabled ? slippagePct / 100 : 0;
   const slExecutionPrice = slippageEnabled
     ? (direction === 'short' ? slPrice * (1 + slippageFraction) : slPrice * (1 - slippageFraction))
@@ -3072,6 +3119,10 @@ function placeOnLighter(){
     orderType: execOrderType,                // 'market' | 'limit'
     sizeUsd: size,
     limitPrice,                              // null for market orders
+    livePrice,                               // reference price used to anchor market-order slippage cap
+    entrySlippage: (execOrderType === 'market')
+      ? (entrySlippageEnabled ? { enabled: true, pct: entrySlippagePct } : { enabled: false, pct: null })
+      : null,
     slPrice,
     slSlippage: slippageEnabled ? { enabled: true, pct: slippagePct } : { enabled: false, pct: null },
     grouping: 'GROUPING_TYPE_ONE_TRIGGERS_THE_OTHER', // entry + SL as one bundled OTO group
