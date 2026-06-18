@@ -3003,7 +3003,7 @@ async function submitOrderToLighter(orderRequest){
     const slLeg = {
       marketIndex: orderRequest.market_index,
       clientOrderIndex: 0,
-      baseAmount: orderRequest.base_amount,
+      baseAmount: 0, // reduce-only trigger leg must be 0/nil per SDK's own OTOCO reference pattern
       price: orderRequest.slExecutionPrice,
       isAsk: !isAsk, // SL closes the position, so it's the opposite side of entry
       orderType: SC.ORDER_TYPE_STOP_LOSS,
