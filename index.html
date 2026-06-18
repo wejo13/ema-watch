@@ -2987,6 +2987,9 @@ async function submitOrderToLighter(orderRequest){
       ? SC.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
       : SC.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME;
 
+    const entryExpiry = orderRequest.orderType === 'market' ? 0 : Date.now() + 28 * 24 * 60 * 60 * 1000;
+    const protectionExpiry = Date.now() + 28 * 24 * 60 * 60 * 1000;
+
     const entryLeg = {
       marketIndex: orderRequest.market_index,
       clientOrderIndex: 0,
@@ -2997,7 +3000,7 @@ async function submitOrderToLighter(orderRequest){
       timeInForce: entryTimeInForce,
       reduceOnly: false,
       triggerPrice: 0,
-      orderExpiry: -1
+      orderExpiry: entryExpiry
     };
 
     const slLeg = {
@@ -3010,7 +3013,7 @@ async function submitOrderToLighter(orderRequest){
       timeInForce: SC.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
       reduceOnly: true,
       triggerPrice: orderRequest.slTriggerPrice,
-      orderExpiry: -1
+      orderExpiry: protectionExpiry
     };
 
     const [tx, hash, error] = await signer.createGroupedOrders(GroupingType.OTO, [entryLeg, slLeg]);
