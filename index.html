@@ -4513,6 +4513,36 @@ const _origSwitchTab = window.switchTab;
 journalRender();
 
 // ===================== END JOURNAL ENGINE =====================
+
+// Autofill Trade tab checklist from live watchlist data when ticker is typed.
+// Checks 1 (above EMA) and 2 (not too far) are derived from distPct + side.
+// Check 3 (swept liquidity) fires if any timeframe has a recent sweep.
+// Checks 4-6 require manual assessment — left untouched.
+function autofillJournalChecksFromTicker(){
+  const ticker = document.getElementById('jf-ticker').value.trim().toUpperCase();
+  const noteEl = document.getElementById('jf-autofill-note');
+  if(!ticker){ if(noteEl) noteEl.style.display='none'; return; }
+  const match = (typeof cryptoData!=='undefined'?cryptoData:[]).concat(typeof stockData!=='undefined'?stockData:[])
+    .find(d => d.symbol === ticker);
+  if(!match){ if(noteEl) noteEl.style.display='none'; return; }
+
+  const aboveEma = match.distPct != null && match.distPct >= 0;
+  const notTooFar = match.distPct != null && Math.abs(match.distPct) <= 5;
+  const swept = match.swept && match.swept.length > 0;
+
+  const c1 = document.getElementById('jf-check-1');
+  const c2 = document.getElementById('jf-check-2');
+  const c3 = document.getElementById('jf-check-3');
+  if(c1) c1.checked = aboveEma;
+  if(c2) c2.checked = notTooFar;
+  if(c3) c3.checked = swept;
+
+  if(noteEl){
+    noteEl.textContent = `Auto-filled from watchlist: ${ticker} ${aboveEma?'above':'below'} EMA · dist ${match.distPct!=null?(match.distPct>=0?'+':'')+match.distPct.toFixed(1)+'%':'?'} · swept: ${swept?'yes':'no'}`;
+    noteEl.style.display = 'block';
+  }
+}
+
 // wire ticker autocomplete and direction tag on page load
 const _tickerInput = document.getElementById('jf-ticker');
 if(_tickerInput) _tickerInput.addEventListener('input', autofillJournalChecksFromTicker);
@@ -5455,10 +5485,10 @@ async function bbHandleFill(ex){
     level.prevFillPrice=null;level.prevFillFee=null;level.prevIsBuy=null;
     level.status='open';level.fillPrice=fillPrice; // show last fill price in table
     bbRenderLevelTable();bbVizDirty=true;
-    // Place fresh order back on THIS level (original side — buy below price, sell above)
+    // Place fresh order back on THIS level using the fixed original side (set at bot start)
     const nextClientId=`bbgrid_r_${li}_${Date.now()}`;
     level.clientOrderId=nextClientId;
-    const origIsBuy=level.price<(bbCurrentPrice||(bbState.lower+bbState.upper)/2);
+    const origIsBuy=level.origIsBuy;
     const orderId=await bbPlaceOrder(level.price,origIsBuy,bbState.notional,nextClientId);
     if(orderId){level.orderId=orderId;console.log('[BBGrid] cycle restart — fresh order at',level.price,origIsBuy?'buy':'sell');}
     // Also restore the adjacent level's order if it was left orderless by the counter placement
@@ -5468,8 +5498,7 @@ async function bbHandleFill(ex){
       if(!adjLv.orderId&&adjLv.status!=='waiting'&&adjLv.status!=='filled'){
         const adjClientId=`bbgrid_r_${adjLi}_${Date.now()}`;
         adjLv.clientOrderId=adjClientId;
-        const adjIsBuy=adjLv.price<(bbCurrentPrice||(bbState.lower+bbState.upper)/2);
-        const adjOrderId=await bbPlaceOrder(adjLv.price,adjIsBuy,bbState.notional,adjClientId);
+        const adjOrderId=await bbPlaceOrder(adjLv.price,adjLv.origIsBuy,bbState.notional,adjClientId);
         if(adjOrderId){adjLv.orderId=adjOrderId;adjLv.status='open';console.log('[BBGrid] restored adjacent level',adjLi,'at',adjLv.price);}
       }
     }
@@ -5511,7 +5540,7 @@ function bbStartPriceWs(){if(bbPriceWs&&bbPriceWs.readyState<2)return;bbPriceWs=
 function bbStopPriceWs(){if(bbPriceWs){try{bbPriceWs.close();}catch(e){}bbPriceWs=null;}}
 async function bbStartPrivateWs(){if(bbPrivateWs&&bbPrivateWs.readyState<2)return;const key=bbGetKey(),secret=bbGetSecret();if(!key||!secret)return;bbPrivateWs=new WebSocket(BB_WS_PRIVATE);bbPrivateWs.onopen=async()=>{const expires=Date.now()+10000,sig=await bbHmac(secret,'GET/realtime'+expires);bbPrivateWs.send(JSON.stringify({op:'auth',args:[key,expires,sig]}));};bbPrivateWs.onmessage=async(ev)=>{try{const msg=JSON.parse(ev.data);if(msg.op==='auth'&&msg.success){console.log('[BBGrid] private WS authenticated');bbPrivateWs.send(JSON.stringify({op:'subscribe',args:['execution']}));}if(msg.topic==='execution'&&msg.data){const execs=Array.isArray(msg.data)?msg.data:[msg.data];for(const ex of execs){console.log('[BBGrid] execution raw:',JSON.stringify(ex).slice(0,300));if(ex.symbol===BB_SYMBOL&&ex.execType==='Trade')await bbHandleFill(ex);}}}catch(e){console.warn('[BBGrid] private WS error',e);};};bbPrivateWs.onclose=()=>{if(bbState&&bbState.running)setTimeout(bbStartPrivateWs,3000);};bbPrivateWs.onerror=()=>bbSetLiveDot('error');}
 function bbStopPrivateWs(){if(bbPrivateWs){try{bbPrivateWs.close();}catch(e){}bbPrivateWs=null;}}
-async function bbBotStart(){const lower=parseFloat(document.getElementById('bb-lower').value),upper=parseFloat(document.getElementById('bb-upper').value),nLevels=parseInt(document.getElementById('bb-levels').value),notional=parseFloat(document.getElementById('bb-notional').value),leverage=parseFloat(document.getElementById('bb-leverage').value)||10;if(isNaN(lower)||isNaN(upper)||isNaN(nLevels)||isNaN(notional)){bbToast('Fill in all fields.');return;}if(upper<=lower){bbToast('Upper must be above lower.');return;}if(nLevels<2){bbToast('Need at least 2 levels.');return;}if(!bbGetKey()||!bbGetSecret()){bbToast('No Bybit API keys — set them in Settings.');return;}bbCheckCapital();const price=bbCurrentPrice||(lower+upper)/2,step=(upper-lower)/(nLevels-1),levels=[];for(let i=0;i<nLevels;i++){const lp=lower+i*step,isBuy=lp<price,clientOrderId=`bbgrid_${Date.now()}_${i}`;levels.push({price:lp,isBuy,notional,status:'pending',clientOrderId});}bbState={lower,upper,nLevels,notional,leverage,levels,running:true,paused:false,startTime:Date.now(),fillCount:0,pnl:0};bbSave();bbSetBadge('running');bbSetLiveDot('live');bbShowControls(true,false);bbUpdateStat('bbstat-state','Setting leverage...');await bbSetLeverage(leverage);bbUpdateStat('bbstat-state','Placing orders...');bbUpdateStat('bbstat-orders','0');bbStartPriceWs();await bbStartPrivateWs();clearInterval(bbUptimeInterval);bbUptimeInterval=setInterval(bbTickUptime,1000);bbStartVizLoop();document.getElementById('bb-start-btn').disabled=true;let placed=0;for(let i=0;i<levels.length;i++){const lv=levels[i];if(Math.abs(lv.price-price)<step*0.1){lv.status='skip';continue;}const orderId=await bbPlaceOrder(lv.price,lv.isBuy,lv.notional,lv.clientOrderId);if(orderId){lv.status='open';lv.orderId=orderId;placed++;}else lv.status='error';bbState.levels[i]=lv;bbUpdateStat('bbstat-orders',placed);bbRenderLevelTable();bbVizDirty=true;await new Promise(r=>setTimeout(r,120));}bbClosedPnlBaseline=null;bbSave();bbUpdateStat('bbstat-state','Running');document.getElementById('bb-start-btn').disabled=false;bbStartPnlPoller();await bbPlaceBoundSLs();bbToast(`Grid bot started - ${placed} orders placed across ${nLevels} levels`);}
+async function bbBotStart(){const lower=parseFloat(document.getElementById('bb-lower').value),upper=parseFloat(document.getElementById('bb-upper').value),nLevels=parseInt(document.getElementById('bb-levels').value),notional=parseFloat(document.getElementById('bb-notional').value),leverage=parseFloat(document.getElementById('bb-leverage').value)||10;if(isNaN(lower)||isNaN(upper)||isNaN(nLevels)||isNaN(notional)){bbToast('Fill in all fields.');return;}if(upper<=lower){bbToast('Upper must be above lower.');return;}if(nLevels<2){bbToast('Need at least 2 levels.');return;}if(!bbGetKey()||!bbGetSecret()){bbToast('No Bybit API keys — set them in Settings.');return;}bbCheckCapital();const price=bbCurrentPrice||(lower+upper)/2,step=(upper-lower)/(nLevels-1),levels=[];for(let i=0;i<nLevels;i++){const lp=lower+i*step,isBuy=lp<price,clientOrderId=`bbgrid_${Date.now()}_${i}`;levels.push({price:lp,isBuy,origIsBuy:isBuy,notional,status:'pending',clientOrderId});}bbState={lower,upper,nLevels,notional,leverage,levels,running:true,paused:false,startTime:Date.now(),fillCount:0,pnl:0};bbSave();bbSetBadge('running');bbSetLiveDot('live');bbShowControls(true,false);bbUpdateStat('bbstat-state','Setting leverage...');await bbSetLeverage(leverage);bbUpdateStat('bbstat-state','Placing orders...');bbUpdateStat('bbstat-orders','0');bbStartPriceWs();await bbStartPrivateWs();clearInterval(bbUptimeInterval);bbUptimeInterval=setInterval(bbTickUptime,1000);bbStartVizLoop();document.getElementById('bb-start-btn').disabled=true;let placed=0;for(let i=0;i<levels.length;i++){const lv=levels[i];if(Math.abs(lv.price-price)<step*0.1){lv.status='skip';continue;}const orderId=await bbPlaceOrder(lv.price,lv.isBuy,lv.notional,lv.clientOrderId);if(orderId){lv.status='open';lv.orderId=orderId;placed++;}else lv.status='error';bbState.levels[i]=lv;bbUpdateStat('bbstat-orders',placed);bbRenderLevelTable();bbVizDirty=true;await new Promise(r=>setTimeout(r,120));}bbClosedPnlBaseline=null;bbSave();bbUpdateStat('bbstat-state','Running');document.getElementById('bb-start-btn').disabled=false;bbStartPnlPoller();await bbPlaceBoundSLs();bbToast(`Grid bot started - ${placed} orders placed across ${nLevels} levels`);}
 function bbBotTogglePause(){if(!bbState)return;bbState.paused=!bbState.paused;bbSave();const paused=bbState.paused;bbSetBadge(paused?'paused':'running');bbSetLiveDot(paused?'paused':'live');bbShowControls(true,paused);bbUpdateStat('bbstat-state',paused?'Paused':'Running');bbToast(paused?'Bot paused':'Bot resumed');}
 async function bbBotStop(isSL){if(!bbState)return;bbState.running=false;bbState.paused=false;bbSave();bbSetBadge('stopped');bbSetLiveDot('error');bbShowControls(false,false);bbUpdateStat('bbstat-state',isSL?'SL Triggered':'Stopped');clearInterval(bbUptimeInterval);bbStopPriceWs();bbStopPrivateWs();bbStopPnlPoller();await bbCancelAllOrders();await bbMarketClose();bbRenderLevelTable();bbVizDirty=true;bbToast(isSL?'SL triggered - orders cancelled & position closed.':'Bot stopped. Orders cancelled & position closed.');}
 function bbTickUptime(){if(!bbState||!bbState.startTime)return;const secs=Math.floor((Date.now()-bbState.startTime)/1000),h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60),s=secs%60;bbUpdateStat('bbstat-uptime',h>0?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(s).padStart(2,'0')}s`);bbCalcOpenPnl();}
