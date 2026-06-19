@@ -1495,8 +1495,12 @@
                 <div class="grid-stat-val" id="bbstat-price">—</div>
               </div>
               <div class="grid-stat">
-                <div class="grid-stat-label">Closed P&amp;L</div>
+                <div class="grid-stat-label">Closed P&amp;L (session)</div>
                 <div class="grid-stat-val" id="bbstat-pnl">—</div>
+              </div>
+              <div class="grid-stat">
+                <div class="grid-stat-label">Lifetime P&amp;L</div>
+                <div class="grid-stat-val" id="bbstat-lifetime-pnl">—</div>
               </div>
               <div class="grid-stat">
                 <div class="grid-stat-label">Open P&amp;L</div>
@@ -1553,6 +1557,22 @@
                   <tr><td colspan="6" class="grid-table-empty">No grid active</td></tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          <!-- Lifetime P&L chart -->
+          <div class="grid-card" style="margin-top:12px;">
+            <div class="grid-card-header">
+              <span class="grid-card-title"><i class="ti ti-chart-line"></i> Lifetime P&amp;L</span>
+              <span id="bb-lifetime-total" style="font-size:12px;font-weight:700;color:var(--teal);">—</span>
+            </div>
+            <div style="position:relative;min-height:120px;">
+              <div id="bb-pnl-chart-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-faint);">No trades yet</div>
+              <canvas id="bb-pnl-chart" style="display:none;width:100%;height:120px;"></canvas>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:8px;">
+              <span style="font-size:10px;color:var(--text-faint);" id="bb-lifetime-trades">0 round trips</span>
+              <button onclick="bbResetLifetime()" style="font-size:10px;color:var(--text-faint);background:none;border:none;cursor:pointer;font-family:var(--font);padding:0;">reset lifetime</button>
             </div>
           </div>
 
@@ -5402,22 +5422,70 @@ async function bbMarketClose(){
     }
   }catch(e){console.warn('[BBGrid] market close failed',e.message);}
 }
-async function bbHandleFill(ex){if(!bbState||!bbState.running||bbState.paused)return;const clientOrderId=ex.orderLinkId||'',fillPrice=parseFloat(ex.execPrice),fillQty=parseFloat(ex.execQty),fee=parseFloat(ex.execFee||0),isBuy=ex.side==='Buy';console.log('[BBGrid] fill — orderLinkId:',clientOrderId,'price:',fillPrice,'side:',ex.side,'fee:',fee);const ci=bbState.levels.findIndex(lv=>lv.counterClientOrderId===clientOrderId);if(ci!==-1){const lv=bbState.levels[ci];if(lv.fillPrice&&fillPrice){const grossPnl=lv.isBuy?(fillPrice-lv.fillPrice)*fillQty:(lv.fillPrice-fillPrice)*fillQty,netPnl=grossPnl-fee-(lv.fillFee||0);bbState.pnl=(bbState.pnl||0)+netPnl;console.log('[BBGrid] round trip PnL:',netPnl.toFixed(4));}lv.counterStatus='filled';lv.counterFillPrice=fillPrice;lv.counterFillFee=fee;bbState.fillCount=(bbState.fillCount||0)+1;bbSave();bbUpdateStat('bbstat-fills',bbState.fillCount);const pnl=bbState.pnl||0;bbUpdateStat('bbstat-pnl',(pnl>=0?'+':'')+'$'+pnl.toFixed(2),pnl>=0?'up':'down');bbRenderLevelTable();bbVizDirty=true;
-    // Place next counter: the counter just filled, so now place the opposite back one level
-    // e.g. sell at level 4 filled → place buy back at level 3 (one level below)
-    // e.g. buy counter at level 2 filled → place sell back at level 3 (one level above)
-    const nextLi=isBuy?ci-1:ci+1; // opposite direction from the counter
-    if(nextLi>=0&&nextLi<bbState.levels.length){
-      const nLv=bbState.levels[nextLi];
-      const nextClientId=`bbgrid_next_${ci}_${Date.now()}`;
-      // reset the original level so it can be filled again
-      lv.status='open';lv.fillPrice=null;lv.fillFee=null;lv.counterClientOrderId=null;lv.counterStatus=null;lv.isBuy=isBuy; // this counter was !lv.isBuy, so next is isBuy
-      lv.clientOrderId=nextClientId;
-      const orderId=await bbPlaceOrder(nLv.price,isBuy,bbState.notional,nextClientId);
-      if(orderId){lv.orderId=orderId;console.log('[BBGrid] next order placed at',nLv.price,isBuy?'buy':'sell');}
-      bbSave();bbUpdateStat('bbstat-orders',bbState.levels.filter(l=>l.status==='open').length);
-    }
-    return;}const li=bbState.levels.findIndex(lv=>lv.clientOrderId===clientOrderId);if(li===-1){console.log('[BBGrid] fill unmatched',clientOrderId);return;}const level=bbState.levels[li];if(level.status==='filled')return;level.status='filled';level.fillPrice=fillPrice;level.fillFee=fee;level.isBuy=isBuy;bbSave();bbRenderLevelTable();bbVizDirty=true;const counterLi=isBuy?li+1:li-1;if(counterLi>=0&&counterLi<bbState.levels.length){const cLv=bbState.levels[counterLi],counterClientId=`bbgrid_counter_${li}_${Date.now()}`;level.counterClientOrderId=counterClientId;const orderId=await bbPlaceOrder(cLv.price,!isBuy,bbState.notional,counterClientId);if(orderId)console.log('[BBGrid] counter-order placed at',cLv.price,!isBuy?'buy':'sell');bbSave();bbUpdateStat('bbstat-orders',bbState.levels.filter(l=>l.status==='open').length);}}
+async function bbHandleFill(ex){
+  if(!bbState||!bbState.running||bbState.paused)return;
+  const clientOrderId=ex.orderLinkId||'';
+  const fillPrice=parseFloat(ex.execPrice);
+  const fillQty=parseFloat(ex.execQty);
+  const fee=parseFloat(ex.execFee||0);
+  const isBuy=ex.side==='Buy';
+  console.log('[BBGrid] fill — orderLinkId:',clientOrderId,'price:',fillPrice,'side:',ex.side,'fee:',fee);
+
+  // Find the level that owns this clientOrderId
+  // A level tracks: clientOrderId (current open order), prevFillPrice/prevFillFee (last fill on this level)
+  const li=bbState.levels.findIndex(lv=>lv.clientOrderId===clientOrderId);
+  if(li===-1){console.log('[BBGrid] fill unmatched — ignoring',clientOrderId);return;}
+
+  const level=bbState.levels[li];
+
+  // If this level has a previous fill, this is the closing leg — book P&L
+  if(level.prevFillPrice!=null){
+    const grossPnl=level.prevIsBuy
+      ?(fillPrice-level.prevFillPrice)*fillQty
+      :(level.prevFillPrice-fillPrice)*fillQty;
+    const netPnl=grossPnl-fee-(level.prevFillFee||0);
+    bbState.pnl=(bbState.pnl||0)+netPnl;
+    bbState.fillCount=(bbState.fillCount||0)+1;
+    console.log('[BBGrid] round trip PnL:',netPnl.toFixed(4),'cumul:',bbState.pnl.toFixed(4));
+    bbSave();
+    bbUpdateStat('bbstat-fills',bbState.fillCount);
+    const pnl=bbState.pnl||0;
+    bbUpdateStat('bbstat-pnl',(pnl>=0?'+':'')+'$'+pnl.toFixed(2),pnl>=0?'up':'down');
+    // Clear prev fill — ready for next cycle
+    level.prevFillPrice=null;level.prevFillFee=null;level.prevIsBuy=null;
+    level.status='open';level.fillPrice=fillPrice; // show last fill price in table
+    bbRenderLevelTable();bbVizDirty=true;
+    // Place next order on this same level (opposite side, same price)
+    const nextClientId=`bbgrid_c_${li}_${Date.now()}`;
+    level.clientOrderId=nextClientId;
+    const orderId=await bbPlaceOrder(level.price,!isBuy,bbState.notional,nextClientId);
+    if(orderId){level.orderId=orderId;console.log('[BBGrid] cycle restart — next order at',level.price,!isBuy?'sell':'buy');}
+    bbSave();bbUpdateStat('bbstat-orders',bbState.levels.filter(l=>l.status==='open').length);
+    return;
+  }
+
+  // First fill on this level — mark it and place counter on adjacent level
+  level.status='filled';
+  level.fillPrice=fillPrice;
+  level.prevFillPrice=fillPrice;
+  level.prevFillFee=fee;
+  level.prevIsBuy=isBuy;
+  level.isBuy=isBuy;
+  bbSave();bbRenderLevelTable();bbVizDirty=true;
+
+  // Counter-order on the adjacent level
+  const counterLi=isBuy?li+1:li-1;
+  if(counterLi>=0&&counterLi<bbState.levels.length){
+    const cLv=bbState.levels[counterLi];
+    const counterClientId=`bbgrid_c_${li}_${Date.now()}`;
+    // Register the counter on THIS level so when it fills we know which level to book P&L on
+    level.clientOrderId=counterClientId;
+    level.status='waiting'; // waiting for counter
+    const orderId=await bbPlaceOrder(cLv.price,!isBuy,bbState.notional,counterClientId);
+    if(orderId){level.orderId=orderId;console.log('[BBGrid] counter-order placed at',cLv.price,!isBuy?'sell':'buy');}
+    bbSave();bbUpdateStat('bbstat-orders',bbState.levels.filter(l=>l.status==='open'||l.status==='waiting').length);
+  }
+}
 function bbStartPriceWs(){if(bbPriceWs&&bbPriceWs.readyState<2)return;bbPriceWs=new WebSocket(BB_WS_PUBLIC);bbPriceWs.onopen=()=>{bbPriceWs.send(JSON.stringify({op:'subscribe',args:['tickers.BTCUSDT']}));};bbPriceWs.onmessage=(ev)=>{try{const msg=JSON.parse(ev.data),d=msg.data;if(!d)return;const p=parseFloat(d.lastPrice||d.markPrice||0);if(p>1000){bbCurrentPrice=p;bbUpdateStat('bbstat-price','$'+p.toLocaleString('en-US',{maximumFractionDigits:1}));bbVizDirty=true;bbCalcOpenPnl();if(bbState&&bbState.running&&!bbState.paused){const slLow=bbState.lower*0.995,slHigh=bbState.upper*1.005;if(p<=slLow||p>=slHigh){console.warn('[BBGrid] SL triggered',p);bbToast('Stop-loss triggered',5000);bbBotStop(true);}}}}catch(e){};};bbPriceWs.onclose=()=>setTimeout(bbStartPriceWs,3000);bbPriceWs.onerror=()=>bbSetLiveDot('error');}
 function bbStopPriceWs(){if(bbPriceWs){try{bbPriceWs.close();}catch(e){}bbPriceWs=null;}}
 async function bbStartPrivateWs(){if(bbPrivateWs&&bbPrivateWs.readyState<2)return;const key=bbGetKey(),secret=bbGetSecret();if(!key||!secret)return;bbPrivateWs=new WebSocket(BB_WS_PRIVATE);bbPrivateWs.onopen=async()=>{const expires=Date.now()+10000,sig=await bbHmac(secret,'GET/realtime'+expires);bbPrivateWs.send(JSON.stringify({op:'auth',args:[key,expires,sig]}));};bbPrivateWs.onmessage=async(ev)=>{try{const msg=JSON.parse(ev.data);if(msg.op==='auth'&&msg.success){console.log('[BBGrid] private WS authenticated');bbPrivateWs.send(JSON.stringify({op:'subscribe',args:['execution']}));}if(msg.topic==='execution'&&msg.data){const execs=Array.isArray(msg.data)?msg.data:[msg.data];for(const ex of execs){console.log('[BBGrid] execution raw:',JSON.stringify(ex).slice(0,300));if(ex.symbol===BB_SYMBOL&&ex.execType==='Trade')await bbHandleFill(ex);}}}catch(e){console.warn('[BBGrid] private WS error',e);};};bbPrivateWs.onclose=()=>{if(bbState&&bbState.running)setTimeout(bbStartPrivateWs,3000);};bbPrivateWs.onerror=()=>bbSetLiveDot('error');}
@@ -5433,15 +5501,14 @@ function bbCalcOpenPnl(){
   const slLow  = bbState.lower * 0.995;
   const slHigh = bbState.upper * 1.005;
   for(const lv of bbState.levels){
-    if(lv.status!=='filled'||!lv.fillPrice)continue;
-    if(lv.counterStatus==='filled')continue;
+    const btcQty=lv.notional/lv.prevFillPrice;
     const btcQty=lv.notional/lv.fillPrice;
-    // Open P&L vs current price
+    const pnl=lv.prevIsBuy?(bbCurrentPrice-lv.prevFillPrice)*btcQty:(lv.prevFillPrice-bbCurrentPrice)*btcQty;
     const pnl=lv.isBuy?(bbCurrentPrice-lv.fillPrice)*btcQty:(lv.fillPrice-bbCurrentPrice)*btcQty;
     openPnl+=pnl;
     // Max loss: what this position would lose if price hits the relevant SL
-    const slPrice = lv.isBuy ? slLow : slHigh;
-    const lossPnl = lv.isBuy?(slPrice-lv.fillPrice)*btcQty:(lv.fillPrice-slPrice)*btcQty;
+    const slPrice = lv.prevIsBuy ? slLow : slHigh;
+    const lossPnl = lv.prevIsBuy?(slPrice-lv.prevFillPrice)*btcQty:(lv.prevFillPrice-slPrice)*btcQty;
     maxLoss+=lossPnl;
   }
   bbUpdateStat('bbstat-opnl',(openPnl>=0?'+':'')+'$'+openPnl.toFixed(2),openPnl>=0?'up':'down');
@@ -5451,9 +5518,183 @@ function bbCalcOpenPnl(){
     bbUpdateStat('bbstat-maxloss','$'+maxLoss.toFixed(2));
   }
 }
-function bbRenderLevelTable(){const tbody=document.getElementById('bb-level-tbody');if(!tbody)return;if(!bbState||!bbState.levels||!bbState.levels.length){tbody.innerHTML='<tr><td colspan="6" class="grid-table-empty">No grid active</td></tr>';return;}const rows=[...bbState.levels].reverse().map((lv,ri)=>{const i=bbState.levels.length-1-ri,side=lv.isBuy?'<span class="gl-side-buy">BUY</span>':'<span class="gl-side-sell">SELL</span>',statusMap={pending:'<span class="gl-status-idle">pending</span>',open:'<span class="gl-status-open">open</span>',filled:'<span class="gl-status-filled">filled</span>',error:'<span class="gl-status-sl">error</span>',skip:'<span class="gl-status-idle">-</span>'},fp=lv.fillPrice?'$'+lv.fillPrice.toLocaleString('en-US',{maximumFractionDigits:2}):'--';return `<tr><td>${i+1}</td><td>$${lv.price.toLocaleString('en-US',{maximumFractionDigits:0})}</td><td>${side}</td><td>$${lv.notional.toLocaleString('en-US',{maximumFractionDigits:0})}</td><td>${fp}</td><td>${statusMap[lv.status]||lv.status}</td></tr>`;});tbody.innerHTML=rows.join('');}
+function bbRenderLevelTable(){const tbody=document.getElementById('bb-level-tbody');if(!tbody)return;if(!bbState||!bbState.levels||!bbState.levels.length){tbody.innerHTML='<tr><td colspan="6" class="grid-table-empty">No grid active</td></tr>';return;}const rows=[...bbState.levels].reverse().map((lv,ri)=>{const i=bbState.levels.length-1-ri,side=lv.isBuy?'<span class="gl-side-buy">BUY</span>':'<span class="gl-side-sell">SELL</span>',statusMap={pending:'<span class="gl-status-idle">pending</span>',open:'<span class="gl-status-open">open</span>',waiting:'<span class="gl-status-filled">waiting</span>',filled:'<span class="gl-status-filled">filled</span>',error:'<span class="gl-status-sl">error</span>',skip:'<span class="gl-status-idle">-</span>'},fp=lv.fillPrice?'$'+lv.fillPrice.toLocaleString('en-US',{maximumFractionDigits:2}):'--';return `<tr><td>${i+1}</td><td>$${lv.price.toLocaleString('en-US',{maximumFractionDigits:0})}</td><td>${side}</td><td>$${lv.notional.toLocaleString('en-US',{maximumFractionDigits:0})}</td><td>${fp}</td><td>${statusMap[lv.status]||lv.status}</td></tr>`;});tbody.innerHTML=rows.join('');}
 function bbStartVizLoop(){if(bbVizRaf)cancelAnimationFrame(bbVizRaf);function loop(){if(bbVizDirty){bbDrawViz();bbVizDirty=false;}bbVizRaf=requestAnimationFrame(loop);}bbVizRaf=requestAnimationFrame(loop);}
 function bbDrawViz(){const canvas=document.getElementById('bb-viz-canvas'),empty=document.getElementById('bb-viz-empty');if(!canvas)return;if(!bbState||!bbState.levels||!bbState.levels.length){canvas.style.display='none';if(empty)empty.style.display='flex';return;}canvas.style.display='block';if(empty)empty.style.display='none';const wrap=document.getElementById('bb-viz-wrap'),W=wrap?wrap.clientWidth-28:500,nL=bbState.levels.length,rowH=Math.max(22,Math.min(40,Math.floor(440/nL))),H=nL*rowH+40;canvas.width=W;canvas.height=H;canvas.style.height=H+'px';const ctx=canvas.getContext('2d');ctx.clearRect(0,0,W,H);const lower=bbState.lower,upper=bbState.upper,range=upper-lower||1,padL=90,padR=20,barW=W-padL-padR,pY=p=>20+((upper-p)/range)*(H-40);ctx.fillStyle='rgba(40,215,200,0.04)';ctx.fillRect(padL,pY(upper),barW,pY(lower)-pY(upper));bbState.levels.forEach(lv=>{const y=pY(lv.price),color=lv.status==='filled'?'#d9a93f':lv.status==='open'?(lv.isBuy?'#3ddc97':'#e2645f'):lv.status==='error'?'#e2645f':'#3d3c44';ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=lv.status==='open'?1.2:0.7;ctx.setLineDash(lv.status==='open'?[]:[4,4]);ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font='10px Inter,sans-serif';ctx.textAlign='right';ctx.fillText('$'+lv.price.toLocaleString('en-US',{maximumFractionDigits:0}),padL-5,y+3.5);if(lv.status==='open'){ctx.fillStyle=color;ctx.font='bold 9px Inter,sans-serif';ctx.textAlign='left';ctx.fillText(lv.isBuy?'▶':'◀',W-padR+3,y+3.5);}});if(bbCurrentPrice!==null&&bbCurrentPrice>=lower*0.9&&bbCurrentPrice<=upper*1.1){const y=pY(bbCurrentPrice);ctx.beginPath();ctx.strokeStyle='#d9a93f';ctx.lineWidth=2;ctx.setLineDash([6,3]);ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#d9a93f';ctx.font='bold 11px Inter,sans-serif';ctx.textAlign='right';ctx.fillText('$'+bbCurrentPrice.toLocaleString('en-US',{maximumFractionDigits:0}),padL-5,y-4);ctx.beginPath();ctx.arc(padL+4,y,4,0,Math.PI*2);ctx.fillStyle='#d9a93f';ctx.fill();}[lower*0.995,upper*1.005].forEach(sl=>{const y=pY(sl);ctx.beginPath();ctx.strokeStyle='rgba(226,100,95,0.5)';ctx.lineWidth=1;ctx.setLineDash([2,4]);ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='rgba(226,100,95,0.7)';ctx.font='9px Inter,sans-serif';ctx.textAlign='right';ctx.fillText('SL',padL-5,y+3);});}
 bbStartPriceWs();
 (function bbRestoreOnLoad(){const saved=bbLoad();if(!saved)return;bbState=saved;document.getElementById('bb-lower').value=saved.lower||'';document.getElementById('bb-upper').value=saved.upper||'';document.getElementById('bb-levels').value=saved.nLevels||'';document.getElementById('bb-notional').value=saved.notional||'';document.getElementById('bb-leverage').value=saved.leverage||10;const lvD=document.getElementById('bb-leverage-display');if(lvD)lvD.textContent=(saved.leverage||10)+'x';if(saved.running){bbSetBadge(saved.paused?'paused':'running');bbSetLiveDot(saved.paused?'paused':'live');bbShowControls(true,saved.paused);bbUpdateStat('bbstat-fills',saved.fillCount||0);const pnl=saved.pnl||0;bbUpdateStat('bbstat-pnl',(pnl>=0?'+':'')+'$'+pnl.toFixed(2),pnl>=0?'up':'down');bbUpdateStat('bbstat-orders',(saved.levels||[]).filter(l=>l.status==='open').length);bbUpdateStat('bbstat-state',saved.paused?'Paused (restored)':'Running (restored)');bbStartPrivateWs();clearInterval(bbUptimeInterval);bbUptimeInterval=setInterval(bbTickUptime,1000);bbStartVizLoop();}else{bbSetBadge('stopped');bbUpdateStat('bbstat-state','Stopped');const pnl=saved.pnl||0;bbUpdateStat('bbstat-pnl',(pnl>=0?'+':'')+'$'+pnl.toFixed(2),pnl>=0?'up':'down');bbUpdateStat('bbstat-fills',saved.fillCount||0);bbStartVizLoop();}bbRenderLevelTable();bbCheckCapital();})();
+</script>
+<script>
+// ===================== BYBIT LIFETIME P&L =====================
+const BB_LIFETIME_KEY = 'ema_watch_bb_lifetime_v1';
+
+function bbLifetimeLoad(){
+  try{ const r=localStorage.getItem(BB_LIFETIME_KEY); return r?JSON.parse(r):{totalPnl:0,trades:[]}; }
+  catch(e){ return {totalPnl:0,trades:[]}; }
+}
+function bbLifetimeSave(data){
+  try{ localStorage.setItem(BB_LIFETIME_KEY,JSON.stringify(data)); }catch(e){}
+}
+
+function bbPlayTradeSound(success){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    if(success){
+      // clean two-tone chime: low then high
+      [[440,0,0.12],[660,0.13,0.18]].forEach(([freq,start,end])=>{
+        const o=ctx.createOscillator(),g=ctx.createGain();
+        o.connect(g);g.connect(ctx.destination);
+        o.type='sine';o.frequency.value=freq;
+        g.gain.setValueAtTime(0,ctx.currentTime+start);
+        g.gain.linearRampToValueAtTime(0.18,ctx.currentTime+start+0.02);
+        g.gain.linearRampToValueAtTime(0,ctx.currentTime+end);
+        o.start(ctx.currentTime+start);o.stop(ctx.currentTime+end+0.05);
+      });
+    } else {
+      // low descending tone for a loss
+      [[300,0,0.2],[220,0.22,0.38]].forEach(([freq,start,end])=>{
+        const o=ctx.createOscillator(),g=ctx.createGain();
+        o.connect(g);g.connect(ctx.destination);
+        o.type='sine';o.frequency.value=freq;
+        g.gain.setValueAtTime(0,ctx.currentTime+start);
+        g.gain.linearRampToValueAtTime(0.15,ctx.currentTime+start+0.02);
+        g.gain.linearRampToValueAtTime(0,ctx.currentTime+end);
+        o.start(ctx.currentTime+start);o.stop(ctx.currentTime+end+0.05);
+      });
+    }
+  }catch(e){}
+}
+
+function bbLifetimeAddTrade(netPnl){
+  const data=bbLifetimeLoad();
+  data.totalPnl=(data.totalPnl||0)+netPnl;
+  data.trades.push({ts:Date.now(),pnl:netPnl,cumulative:data.totalPnl});
+  bbLifetimeSave(data);
+  bbRenderLifetime();
+  bbPlayTradeSound(netPnl>=0);
+  // Telegram notification
+  if(typeof sendTelegramMessage === 'function'){
+    const sign=netPnl>=0?'✅':'❌';
+    const sessionPnl=bbState?bbState.pnl||0:0;
+    const msg=`${sign} Grid Bot · Bybit — Round trip complete\n`
+      +`Trade P&L: ${netPnl>=0?'+':''}$${netPnl.toFixed(4)}\n`
+      +`Session P&L: ${sessionPnl>=0?'+':''}$${sessionPnl.toFixed(2)}\n`
+      +`Lifetime P&L: ${data.totalPnl>=0?'+':''}$${data.totalPnl.toFixed(2)}\n`
+      +`Total trades: ${data.trades.length}`;
+    sendTelegramMessage(msg).catch(()=>{});
+  }
+}
+
+function bbResetLifetime(){
+  if(!confirm('Reset lifetime P&L history? This cannot be undone.'))return;
+  bbLifetimeSave({totalPnl:0,trades:[]});
+  bbRenderLifetime();
+}
+
+function bbRenderLifetime(){
+  const data=bbLifetimeLoad();
+  const total=data.totalPnl||0;
+  const trades=data.trades||[];
+
+  // header total
+  const hEl=document.getElementById('bb-lifetime-total');
+  if(hEl){ hEl.textContent=(total>=0?'+':'')+'$'+total.toFixed(2); hEl.style.color=total>=0?'var(--green)':'var(--red)'; }
+
+  // stat in live stats panel
+  const sEl=document.getElementById('bbstat-lifetime-pnl');
+  if(sEl){ sEl.textContent=(total>=0?'+':'')+'$'+total.toFixed(2); sEl.className='grid-stat-val '+(total>=0?'up':'down'); }
+
+  // trade count
+  const tEl=document.getElementById('bb-lifetime-trades');
+  if(tEl) tEl.textContent=trades.length+' round trip'+(trades.length===1?'':'s');
+
+  // chart
+  const canvas=document.getElementById('bb-pnl-chart');
+  const empty=document.getElementById('bb-pnl-chart-empty');
+  if(!canvas)return;
+
+  if(trades.length<2){
+    canvas.style.display='none';
+    if(empty)empty.style.display='flex';
+    return;
+  }
+  canvas.style.display='block';
+  if(empty)empty.style.display='none';
+
+  const W=canvas.parentElement.clientWidth||500;
+  const H=120;
+  canvas.width=W; canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+
+  const vals=trades.map(t=>t.cumulative);
+  const minV=Math.min(0,...vals), maxV=Math.max(0,...vals);
+  const range=maxV-minV||1;
+  const padL=8,padR=8,padT=10,padB=10;
+  const chartW=W-padL-padR, chartH=H-padT-padB;
+
+  const xOf=i=>padL+i*(chartW/(trades.length-1));
+  const yOf=v=>padT+chartH-((v-minV)/range)*chartH;
+
+  // zero line
+  const zeroY=yOf(0);
+  ctx.beginPath();
+  ctx.strokeStyle='rgba(255,255,255,0.08)';
+  ctx.lineWidth=1;
+  ctx.moveTo(padL,zeroY);
+  ctx.lineTo(W-padR,zeroY);
+  ctx.stroke();
+
+  // fill under/over line
+  ctx.beginPath();
+  ctx.moveTo(xOf(0),yOf(vals[0]));
+  for(let i=1;i<vals.length;i++) ctx.lineTo(xOf(i),yOf(vals[i]));
+  ctx.lineTo(xOf(vals.length-1),zeroY);
+  ctx.lineTo(xOf(0),zeroY);
+  ctx.closePath();
+  const grad=ctx.createLinearGradient(0,padT,0,H-padB);
+  if(total>=0){
+    grad.addColorStop(0,'rgba(61,220,151,0.25)');
+    grad.addColorStop(1,'rgba(61,220,151,0.02)');
+  } else {
+    grad.addColorStop(0,'rgba(226,100,95,0.02)');
+    grad.addColorStop(1,'rgba(226,100,95,0.25)');
+  }
+  ctx.fillStyle=grad;
+  ctx.fill();
+
+  // line
+  ctx.beginPath();
+  ctx.strokeStyle=total>=0?'#3ddc97':'#e2645f';
+  ctx.lineWidth=1.5;
+  ctx.moveTo(xOf(0),yOf(vals[0]));
+  for(let i=1;i<vals.length;i++) ctx.lineTo(xOf(i),yOf(vals[i]));
+  ctx.stroke();
+
+  // last value dot
+  const lx=xOf(vals.length-1), ly=yOf(vals[vals.length-1]);
+  ctx.beginPath();
+  ctx.arc(lx,ly,3,0,Math.PI*2);
+  ctx.fillStyle=total>=0?'#3ddc97':'#e2645f';
+  ctx.fill();
+
+  // last value label
+  ctx.fillStyle=total>=0?'#3ddc97':'#e2645f';
+  ctx.font='bold 10px Inter,sans-serif';
+  ctx.textAlign='right';
+  ctx.fillText((total>=0?'+':'')+'$'+total.toFixed(2),W-padR-6,ly+(total>=0?-5:12));
+}
+
+// Patch bbHandleFill to call bbLifetimeAddTrade on round trip completion
+const _bbHandleFillOrig = bbHandleFill;
+bbHandleFill = async function(ex){
+  const prevPnl = bbState ? (bbState.pnl||0) : 0;
+  await _bbHandleFillOrig(ex);
+  const newPnl = bbState ? (bbState.pnl||0) : 0;
+  const diff = newPnl - prevPnl;
+  if(diff !== 0) bbLifetimeAddTrade(diff);
+};
+
+// Init on load
+bbRenderLifetime();
 </script>
