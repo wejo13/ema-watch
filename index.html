@@ -5501,14 +5501,12 @@ function bbCalcOpenPnl(){
   const slLow  = bbState.lower * 0.995;
   const slHigh = bbState.upper * 1.005;
   for(const lv of bbState.levels){
-    const btcQty=lv.notional/lv.prevFillPrice;
     const btcQty=lv.notional/lv.fillPrice;
-    const pnl=lv.prevIsBuy?(bbCurrentPrice-lv.prevFillPrice)*btcQty:(lv.prevFillPrice-bbCurrentPrice)*btcQty;
     const pnl=lv.isBuy?(bbCurrentPrice-lv.fillPrice)*btcQty:(lv.fillPrice-bbCurrentPrice)*btcQty;
     openPnl+=pnl;
     // Max loss: what this position would lose if price hits the relevant SL
-    const slPrice = lv.prevIsBuy ? slLow : slHigh;
-    const lossPnl = lv.prevIsBuy?(slPrice-lv.prevFillPrice)*btcQty:(lv.prevFillPrice-slPrice)*btcQty;
+    const slPrice = lv.isBuy ? slLow : slHigh;
+    const lossPnl = lv.isBuy?(slPrice-lv.fillPrice)*btcQty:(lv.fillPrice-slPrice)*btcQty;
     maxLoss+=lossPnl;
   }
   bbUpdateStat('bbstat-opnl',(openPnl>=0?'+':'')+'$'+openPnl.toFixed(2),openPnl>=0?'up':'down');
