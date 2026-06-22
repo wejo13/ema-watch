@@ -847,22 +847,50 @@ async function btRun() {
     const periodCandles = allCandles.filter(c => c.ts >= BT_START_TS);
     const firstTradable = periodCandles[0];
     const warmupStart = allCandles[0];
+
+    // Detect 4H candle gaps in the full fetched set (anything > 2× interval is a gap)
+    const gapThresholdMs = BT_INTERVAL_MS * 2;
+    const gaps = [];
+    for (let gi = 1; gi < allCandles.length; gi++) {
+      const diff = allCandles[gi].ts - allCandles[gi - 1].ts;
+      if (diff > gapThresholdMs) {
+        gaps.push(
+          `  ${new Date(allCandles[gi - 1].ts).toISOString().slice(0,10)} → ` +
+          `${new Date(allCandles[gi].ts).toISOString().slice(0,10)} ` +
+          `(${Math.round(diff / BT_INTERVAL_MS)} candles missing)`
+        );
+      }
+    }
+
+    // Selected period label
+    const periodLabel = rangeMode === 'bull'
+      ? (document.getElementById('bt-bull-period-select')?.value === 'bull1' ? 'Bull Run 1 (Feb 2019 – Nov 2021)'
+        : document.getElementById('bt-bull-period-select')?.value === 'bull2' ? 'Bull Run 2 (Dec 2022 – Oct 2025)'
+        : 'Both Bull Runs combined')
+      : `Custom (${fromLabel} → ${toLabel})`;
+
+    const firstTradableIdx = firstTradable ? allCandles.indexOf(firstTradable) : -1;
+    const emaWarm = firstTradableIdx >= 0 && allEma[firstTradableIdx] !== null ? 'YES' : 'NO — PROBLEM';
+
     const auditLines = [
-      `── Bucket 1 Data Audit ──────────────────────────────`,
-      `Warmup fetch start : ${warmupStart ? new Date(warmupStart.ts).toISOString().slice(0,10) : 'n/a'}`,
-      `Warmup candle count: ${warmupCandles.length} (target ≥ ${BT_WARMUP_CANDLES})`,
-      `Period start (BT)  : ${new Date(BT_START_TS).toISOString().slice(0,10)}`,
-      `First tradable     : ${firstTradable ? new Date(firstTradable.ts).toISOString().slice(0,10) : 'n/a'}`,
-      `Period candles     : ${periodCandles.length}`,
-      `Total fetched      : ${allCandles.length}`,
-      `EMA warm at entry  : ${allEma[allCandles.indexOf(firstTradable)] !== null ? 'YES' : 'NO — PROBLEM'}`,
-      `─────────────────────────────────────────────────────`,
+      `=== BUCKET 1 DATA AUDIT ===`,
+      `Selected period            : ${periodLabel}`,
+      `Warmup fetch start         : ${warmupStart ? new Date(warmupStart.ts).toISOString().slice(0,10) : 'n/a'}`,
+      `Warmup candles requested   : ${BT_WARMUP_CANDLES}`,
+      `Warmup candles actually fetched: ${warmupCandles.length}`,
+      `Official period start      : ${new Date(BT_START_TS).toISOString().slice(0,10)}`,
+      `First eligible trade candle: ${firstTradable ? new Date(firstTradable.ts).toISOString().slice(0,10) : 'n/a'}`,
+      `Total candles fetched      : ${allCandles.length}`,
+      `EMA warm at first eligible candle: ${emaWarm}`,
+      `Detected 4H candle gaps    : ${gaps.length === 0 ? 'none' : gaps.length + ' gap(s):\n' + gaps.join('\n')}`,
+      `===========================`,
     ].join('\n');
     console.log(auditLines);
 
-    // Surface audit in the existing debug textarea so it's visible in the UI
+    // Write audit into textarea. It is stored separately so the entry/rejection log
+    // written below (when debug mode is on) never overwrites it.
     const debugEl = document.getElementById('bt-debug-output');
-    if (debugEl) debugEl.value = auditLines + '\n\n' + (debugEl.value || '');
+    const _btAuditBlock = auditLines; // captured in closure for re-prepend below
 
     statusEl.textContent = `${allCandles.length.toLocaleString()} candles loaded (${warmupCandles.length} warmup + ${periodCandles.length} period) — computing EMA…`;
 
@@ -890,10 +918,17 @@ async function btRun() {
       return btSummarise(trades, tp);
     });
 
-    if (btDebug) {
-      document.getElementById('bt-debug-output').value = btDebugLog.length
-        ? btDebugLog.join('\n')
-        : '(no rejected candles found within 3% of EMA)';
+    // Always show the audit block at the top of the debug textarea.
+    // Entry/rejection log is appended below it only when debug mode is on.
+    if (debugEl) {
+      if (btDebug) {
+        const entryLog = btDebugLog.length
+          ? btDebugLog.join('\n')
+          : '(no entry/rejection events logged within 10% of EMA)';
+        debugEl.value = _btAuditBlock + '\n\n--- Entry / Rejection Log (debug mode) ---\n' + entryLog;
+      } else {
+        debugEl.value = _btAuditBlock;
+      }
     }
 
     // Render
