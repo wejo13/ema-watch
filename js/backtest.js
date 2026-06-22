@@ -42,6 +42,45 @@ let btFullEma = null;       // warmup-inclusive EMA aligned to btAllCandles (for
 let btAllCandles = null;    // full warmup+period candle array (for EMA index lookup)
 let btWindowSlices = null;  // [{ wStart, wEnd, periodId, sliceCandles, sliceEma }] (bull mode)
 
+// ── Study configs ─────────────────────────────────────────────────────────────
+// Each study runs the same engine with a different TP universe and result store.
+// Running one study never overwrites the other's results.
+const BT_STUDY_CONFIGS = {
+  full: {
+    id:           'full',
+    tpLevels:     [1,2,3,4,5,6,7,8,9,10,20,50,100],
+    title:        'Core Trend Study — all bull-market reclaims',
+    disclaimer:   'Tests all valid 4H 200 EMA reclaims within bull-run windows across the full 1R–100R TP universe.',
+    btnId:        'bt-opt-grid-run-btn',
+    statusId:     'bt-opt-grid-status',
+    outputId:     'bt-opt-grid-output',
+    rankBtnId:    'bt-rank-run-btn',
+    rankStatusId: 'bt-rank-status',
+    rankWrapId:   'bt-rank-wrap',
+  },
+  tactical: {
+    id:           'tactical',
+    tpLevels:     [1,2,3,4,5,6,7,8,9,10],
+    title:        'Tactical 4H 200 EMA Reclaim Study — all eligible bull-market reclaim signals',
+    disclaimer:   'Tests all valid 4H 200 EMA reclaims within bull-run windows. ' +
+                  'TP universe restricted to 1R–10R for practical tactical re-entry sizing. ' +
+                  'Core and tactical accounts are independent — a core position does not block a tactical entry. ' +
+                  'This covers all valid reclaims, not specifically post-distribution re-entries.',
+    btnId:        'bt-tactical-grid-run-btn',
+    statusId:     'bt-tactical-grid-status',
+    outputId:     'bt-tactical-grid-output',
+    rankBtnId:    'bt-tactical-rank-run-btn',
+    rankStatusId: 'bt-tactical-rank-status',
+    rankWrapId:   'bt-tactical-rank-wrap',
+  },
+};
+
+// ── Result stores — one per study, never shared ───────────────────────────────
+let btOptGrid               = null; // full study raw results
+let btOptGridParams         = null; // full study parameter snapshot
+let btOptGridTactical       = null; // tactical study raw results
+let btOptGridTacticalParams = null; // tactical study parameter snapshot
+
 // ── EMA calculation ───────────────────────────────────────────────────────────
 function btCalcEMA(closes, period) {
   const k = 2 / (period + 1);
@@ -1097,7 +1136,7 @@ let btGridResults = null; // { slPct: number, cells: [{ tp, ...summary, finalBal
 const BT_GRID_MIN_CLOSED = 15; // below this, flag as low-sample in heatmap display
 
 // btOptGrid, btOptGridParams, btOptGridTactical, btOptGridTacticalParams
-// are declared in the study configs block above (with BT_STUDY_CONFIGS).
+// are declared in the BT_STUDY_CONFIGS globals block near the top of this file.
 
 function btRunGrid() {
   const statusEl = document.getElementById('bt-grid-status');
@@ -1166,6 +1205,14 @@ function btRunGrid() {
 
 // ── Shared SL × TP Optimization Grid runner (parameterized by study config) ───
 function btRunOptGridForStudy(cfg) {
+  // Guard: cfg must be a valid study config object with required fields.
+  if (!cfg || !cfg.id || !cfg.tpLevels || !cfg.btnId) {
+    console.error('[btRunOptGridForStudy] Invalid study config:', cfg);
+    const fallbackStatus = document.getElementById('bt-status');
+    if (fallbackStatus) fallbackStatus.textContent = 'Error: invalid study config — check BT_STUDY_CONFIGS';
+    return;
+  }
+
   const statusEl  = document.getElementById(cfg.statusId);
   const btn       = document.getElementById(cfg.btnId);
   const debugEl   = document.getElementById('bt-debug-output');
@@ -1342,6 +1389,14 @@ function btRunTacticalGrid() { btRunOptGridForStudy(BT_STUDY_CONFIGS.tactical); 
 // Uses btOptGrid (raw results) and btOptGridParams (risk snapshot) set by btRunOptGrid().
 // Does NOT re-run the engine. Does NOT recommend a configuration.
 function btRunFiltersAndRankForStudy(cfg) {
+  // Guard: cfg must be a valid study config object with required fields.
+  if (!cfg || !cfg.id || !cfg.rankWrapId) {
+    console.error('[btRunFiltersAndRankForStudy] Invalid study config:', cfg);
+    const fallbackStatus = document.getElementById('bt-status');
+    if (fallbackStatus) fallbackStatus.textContent = 'Error: invalid study config — check BT_STUDY_CONFIGS';
+    return;
+  }
+
   const wrapEl   = document.getElementById(cfg.rankWrapId);
   const statusEl = document.getElementById(cfg.rankStatusId);
   const btn      = document.getElementById(cfg.rankBtnId);
