@@ -35,8 +35,12 @@ const BT_COLORS = [
   '#ff9f43','#54a0ff','#5f27cd'
 ];
 
-let btData = null; // cached raw candles
-let btResults = null; // results per TP level
+let btData = null;          // window-trimmed candles (for grid display)
+let btResults = null;       // combined results per TP level (for UI cards/chart)
+let btPeriodResults = null; // { bull1: [...], bull2: [...] } — per-period summaries (Buckets 4-6)
+let btFullEma = null;       // warmup-inclusive EMA aligned to btAllCandles (for grid reuse)
+let btAllCandles = null;    // full warmup+period candle array (for EMA index lookup)
+let btWindowSlices = null;  // [{ wStart, wEnd, periodId, sliceCandles, sliceEma }] (bull mode)
 
 // ── EMA calculation ───────────────────────────────────────────────────────────
 function btCalcEMA(closes, period) {
@@ -126,39 +130,40 @@ function btApplyIncludeWindows(candles, ema) {
   return { candles: outCandles, ema: outEma };
 }
 
-// ── Run backtest for one TP level ─────────────────────────────────────────────
-function btRunLevel(candles, ema, tpMultiple) {
+// ── Run backtest for one period × one TP level ───────────────────────────────
+// candles / ema : index-aligned arrays for ONE contiguous period (already trimmed
+//                 from the full warmup-inclusive sequence — EMA values are warm).
+// periodStart   : first tradable timestamp for this period (entries blocked before it).
+// periodEnd     : final timestamp of this period (used for end-of-period close).
+// tpMultiple    : TP as a multiple of SL (1R, 2R, … 100R).
+// periodId      : string label attached to every trade ('bull1' | 'bull2' | 'custom').
+//
+// Bucket 3 guarantees:
+//   • Starts flat — cooldown=0, inTrade=null — no state carried from another period.
+//   • No seam detection — one contiguous period per call, seams do not occur.
+//   • End-of-period close — any trade still open on the final candle is closed at
+//     that candle's close price, labelled 'test_end_exit', and counted in realized P&L.
+//     rMade is computed as (exitPrice / entry - 1) / slPct so it is in R units.
+//   • Entry guard uses periodStart param, not the BT_START_TS global.
+function btRunPeriod(candles, ema, tpMultiple, periodStart, periodEnd, periodId) {
   const slPct = BT_SL_PCT;
   const tpPct = BT_SL_PCT * tpMultiple;
   const trades = [];
   let cooldown = 0;
   let inTrade = null;
-  const maxGapMs = BT_INTERVAL_MS * 2; // allow normal 4H spacing, flag anything bigger as a window seam
 
   for (let i = 1; i < candles.length; i++) {
     const c = candles[i];
     const emaVal = ema[i];
 
-    // Detect a seam between two non-contiguous bull-market windows: reset state,
-    // any open trade at a seam is force-closed as "Open" since we can't track it
-    // across the excluded gap.
-    if (c.ts - candles[i - 1].ts > maxGapMs) {
-      if (inTrade) {
-        inTrade.outcome = 'Open';
-        trades.push(inTrade);
-        inTrade = null;
-      }
-      cooldown = 0;
-    }
-
     if (!emaVal) { if (cooldown > 0) cooldown--; continue; }
 
-    // If in trade, check SL/TP hit on this candle
+    // ── In-trade: check SL / TP on this candle ───────────────────────────────
     if (inTrade) {
       const slPrice = inTrade.entry * (1 - slPct);
       const tpPrice = inTrade.entry * (1 + tpPct);
 
-      // Check SL first (conservative — assume worst case on same candle)
+      // SL-first: if both levels touched on same candle, SL wins (conservative)
       if (c.l <= slPrice) {
         inTrade.outcome = 'Loss';
         inTrade.exitPrice = slPrice;
@@ -184,22 +189,21 @@ function btRunLevel(candles, ema, tpMultiple) {
 
     if (cooldown > 0) { cooldown--; continue; }
 
-    // Entry condition: previous candle closed below EMA, this candle is bullish
-    // and closes above EMA (reclaim from below)
+    // Entry guard: periodStart blocks any warmup candles that may precede the
+    // tradable window in the slice (should not occur after correct slicing, but
+    // this is a belt-and-suspenders check matching Bucket 1 intent).
+    if (c.ts < periodStart) continue;
+
+    // ── Entry condition ───────────────────────────────────────────────────────
     const prevEma = ema[i - 1];
     const prevClose = candles[i - 1].c;
     const wasBelow = prevClose < prevEma;
     const isBullish = c.c > c.o;
     const closedAbove = c.c > emaVal;
 
-    // Hard entry guard: never open a trade on a warmup candle.
-    // BT_START_TS is the first eligible tradable candle boundary — warmup candles
-    // exist solely to produce a well-seeded EMA and must not generate entries,
-    // cooldown state, or any performance metrics.
-    if (c.ts < BT_START_TS) continue;
-
     if (wasBelow && isBullish && closedAbove) {
       inTrade = {
+        periodId,
         entryTs: c.ts,
         entry: c.c,
         tp: tpMultiple,
@@ -211,12 +215,12 @@ function btRunLevel(candles, ema, tpMultiple) {
       if (btDebug && tpMultiple === 1) {
         btDebugLog.push(
           new Date(c.ts).toISOString().slice(0,16).replace('T',' ') +
-          '  ENTRY close=' + c.c.toFixed(1) + ' open=' + c.o.toFixed(1) + ' ema=' + emaVal.toFixed(1) +
+          `  [${periodId}] ENTRY close=` + c.c.toFixed(1) + ' open=' + c.o.toFixed(1) +
+          ' ema=' + emaVal.toFixed(1) +
           '  prevClose=' + prevClose.toFixed(1) + ' prevEma=' + prevEma.toFixed(1)
         );
       }
     } else if (btDebug && tpMultiple === 1 && prevEma != null && Math.abs(c.c - emaVal) / emaVal < 0.10) {
-      // Debug: collect near-miss candles close to EMA so rejected signals can be inspected in UI
       let reason = [];
       if (!wasBelow) reason.push('prev close was already above EMA');
       if (!isBullish) reason.push('candle not bullish');
@@ -224,32 +228,48 @@ function btRunLevel(candles, ema, tpMultiple) {
       if (cooldown > 0) reason.push('in cooldown (' + cooldown + ' left)');
       btDebugLog.push(
         new Date(c.ts).toISOString().slice(0,16).replace('T',' ') +
-        '  close=' + c.c.toFixed(1) + ' open=' + c.o.toFixed(1) + ' ema=' + emaVal.toFixed(1) +
+        `  [${periodId}]  close=` + c.c.toFixed(1) + ' open=' + c.o.toFixed(1) +
+        ' ema=' + emaVal.toFixed(1) +
         '  prevClose=' + prevClose.toFixed(1) + ' prevEma=' + prevEma.toFixed(1) +
         '  -> ' + (reason.length ? reason.join(', ') : 'unknown')
       );
     }
   }
 
-  // Any open trade at end of data
+  // ── End-of-period close ───────────────────────────────────────────────────
+  // Any trade still open at the last candle is force-closed at that candle's
+  // close price and counted as realized. It must not be ignored or carried forward.
   if (inTrade) {
-    inTrade.outcome = 'Open';
+    const lastCandle = candles[candles.length - 1];
+    const exitPrice = lastCandle.c;
+    // R made = (exit / entry - 1) / slPct  (positive = profit, negative = loss)
+    const rMade = (exitPrice / inTrade.entry - 1) / slPct;
+    inTrade.outcome = 'test_end_exit';
+    inTrade.exitPrice = exitPrice;
+    inTrade.exitTs = lastCandle.ts;
+    inTrade.rMade = rMade;
     trades.push(inTrade);
+    inTrade = null;
   }
 
   return trades;
 }
 
-// ── Summarise trades for a TP level ──────────────────────────────────────────
+// ── Summarise trades for one period × one TP level ───────────────────────────
+// 'test_end_exit' trades are realized (closed at final candle's close) and
+// counted in wins/losses based on rMade sign. 'Open' never appears after
+// Bucket 3 — the field is kept for safety but should always be 0.
 function btSummarise(trades, tpMultiple) {
   const closed = trades.filter(t => t.outcome !== 'Open');
-  const wins = trades.filter(t => t.outcome === 'Win');
-  const losses = trades.filter(t => t.outcome === 'Loss');
+  // test_end_exit: classify by rMade sign so they contribute to win rate / PF
+  const wins    = closed.filter(t => t.outcome === 'Win' || (t.outcome === 'test_end_exit' && t.rMade > 0));
+  const losses  = closed.filter(t => t.outcome === 'Loss' || (t.outcome === 'test_end_exit' && t.rMade <= 0));
   const winRate = closed.length ? (wins.length / closed.length * 100) : 0;
-  const grossWin = wins.length * tpMultiple;
-  const grossLoss = losses.length;
+  // netR sums actual rMade values (test_end_exit uses fractional R, not integer)
+  const netR = closed.reduce((sum, t) => sum + (t.rMade || 0), 0);
+  const grossWin  = wins.reduce((sum, t)   => sum + Math.max(0, t.rMade || 0), 0);
+  const grossLoss = losses.reduce((sum, t) => sum + Math.abs(Math.min(0, t.rMade || 0)), 0);
   const profitFactor = grossLoss > 0 ? (grossWin / grossLoss) : wins.length > 0 ? Infinity : 0;
-  const netR = grossWin - grossLoss;
   return {
     tp: tpMultiple, trades, total: trades.length,
     wins: wins.length, losses: losses.length,
@@ -787,6 +807,10 @@ async function btRun() {
 
   btDebug = document.getElementById('bt-debug-toggle').checked;
   btDebugLog = [];
+  // Reset opt-grid button state whenever a new backtest run begins.
+  // It will be re-enabled only if "Both Bull Runs" completes successfully.
+  btWindowSlices = null;
+  btEnableOptGridBtn();
   const debugPanel = document.getElementById('bt-debug-panel');
   debugPanel.style.display = btDebug ? 'block' : 'none';
 
@@ -939,7 +963,7 @@ async function btRun() {
     ({ candles, ema } = btApplyIncludeWindows(candles, ema));
 
     // After window trim, enforce the entry guard at candle level (belt-and-suspenders:
-    // btRunLevel also checks c.ts >= BT_START_TS before opening any trade)
+    // btRunPeriod also checks c.ts >= periodStart before opening any trade)
     btData = candles;
 
     if (!candles.length) {
@@ -950,11 +974,64 @@ async function btRun() {
     }
 
     // Run all TP levels
+    // In bull mode: run each period independently so state never bleeds across.
+    // In custom mode: single period run.
     statusEl.textContent = 'Running backtest…';
-    btResults = BT_TP_LEVELS.map(tp => {
-      const trades = btRunLevel(candles, ema, tp);
-      return btSummarise(trades, tp);
-    });
+
+    if (rangeMode === 'bull' && BT_INCLUDE_WINDOWS && BT_INCLUDE_WINDOWS.length > 0) {
+      // Slice candles/ema to each window from the full warmup-inclusive arrays.
+      // EMA values at window boundaries are already warm — no recalculation.
+      const windowSlices = BT_INCLUDE_WINDOWS.map(([wStart, wEnd], wi) => {
+        const ids = ['bull1', 'bull2'];
+        const periodId = ids[wi] || `period${wi + 1}`;
+        const sliceCandles = allCandles.filter(c => c.ts >= wStart && c.ts <= wEnd);
+        // ema is index-aligned with allCandles — find matching indices
+        const sliceEma = sliceCandles.map(c => {
+          const idx = allCandles.indexOf(c);
+          return allEma[idx];
+        });
+        return { wStart, wEnd, periodId, sliceCandles, sliceEma };
+      });
+
+      // Run each period independently, accumulate combined trade list per TP level
+      btResults = BT_TP_LEVELS.map(tp => {
+        const allTrades = [];
+        windowSlices.forEach(({ wStart, wEnd, periodId, sliceCandles, sliceEma }) => {
+          const trades = btRunPeriod(sliceCandles, sliceEma, tp, wStart, wEnd, periodId);
+          allTrades.push(...trades);
+        });
+        return btSummarise(allTrades, tp);
+      });
+
+      // Also store per-period results for Bucket 4-6 filters and ranking
+      btPeriodResults = {};
+      windowSlices.forEach(({ wStart, wEnd, periodId, sliceCandles, sliceEma }) => {
+        btPeriodResults[periodId] = BT_TP_LEVELS.map(tp => {
+          const trades = btRunPeriod(sliceCandles, sliceEma, tp, wStart, wEnd, periodId);
+          return btSummarise(trades, tp);
+        });
+      });
+
+      // btData: use the full trimmed candle set for the grid heatmap display
+      btData = candles;
+      // btFullEma: store the warmup-inclusive EMA for grid reuse (fixes Bucket 2 bug)
+      btFullEma = allEma;
+      btAllCandles = allCandles;
+      btWindowSlices = windowSlices;
+
+    } else {
+      // Custom range: single period
+      const periodId = 'custom';
+      btResults = BT_TP_LEVELS.map(tp => {
+        const trades = btRunPeriod(candles, ema, tp, BT_START_TS, BT_END_TS, periodId);
+        return btSummarise(trades, tp);
+      });
+      btPeriodResults = null;
+      btData = candles;
+      btFullEma = allEma;
+      btAllCandles = allCandles;
+      btWindowSlices = null;
+    }
 
     // Always show the audit block at the top of the debug textarea.
     // Entry/rejection log is appended below it only when debug mode is on.
@@ -986,6 +1063,15 @@ async function btRun() {
     btRenderLog();
 
     const best = btResults.reduce((a, b) => b.netR > a.netR ? b : a);
+
+    // Enable the opt-grid button now if both bull run periods are ready.
+    // btWindowSlices was populated above when rangeMode==='bull' with both periods.
+    btEnableOptGridBtn();
+    if (btWindowSlices && btWindowSlices.length >= 2) {
+      const optStatus = document.getElementById('bt-opt-grid-status');
+      if (optStatus) optStatus.textContent = 'Both Bull Runs data ready — click to run optimisation';
+    }
+
     statusEl.textContent = `Done · ${fromLabel} → ${toLabel} · SL ${slPctVal}% · ${candles.length.toLocaleString()} candles · Best: ${best.tp}R (${best.winRate.toFixed(1)}% WR, +${best.netR.toFixed(1)}R net)`;
   } catch(e) {
     statusEl.textContent = 'Error: ' + e.message;
@@ -998,7 +1084,18 @@ async function btRun() {
 
 // ── Parameter Grid (SL x TP heatmap) ──────────────────────────────────────────
 let btGridResults = null; // { slPct: number, cells: [{ tp, ...summary, finalBalance, pnl }] }[]
-const BT_GRID_MIN_CLOSED = 15; // below this, flag as low-sample
+const BT_GRID_MIN_CLOSED = 15; // below this, flag as low-sample in heatmap display
+
+// Bucket 4: raw optimization grid — separate from btGridResults (heatmap display).
+// Populated by btRunOptGrid(). Read by Buckets 5-6 for filtering and ranking.
+// Structure per combination:
+//   { slPct, tp,
+//     bull1: { trades, wins, losses, testEndExits, netR, pnl },
+//     bull2: { trades, wins, losses, testEndExits, netR, pnl },
+//     combined: { trades, wins, losses, testEndExits, netR, pnl } }
+let btOptGrid = null;
+// Parameters used for the last btRunOptGrid() call — shown in debug output.
+let btOptGridParams = null;
 
 function btRunGrid() {
   const statusEl = document.getElementById('bt-grid-status');
@@ -1032,9 +1129,14 @@ function btRunGrid() {
   btn.style.opacity = '0.5';
   statusEl.textContent = `Running ${cellCount} combos…`;
 
-  // Recompute EMA once on btData (already trimmed to the active range/windows)
-  const closes = btData.map(c => c.c);
-  const ema = btCalcEMA(closes, BT_EMA_PERIOD);
+  // Use the warmup-inclusive EMA stored at run time — do NOT recompute on the
+  // trimmed btData, which would re-seed the EMA from the first window candle
+  // and undo the Bucket 1 warmup fix. btFullEma is index-aligned with btAllCandles;
+  // extract the slice that matches btData by timestamp lookup.
+  const ema = btData.map(c => {
+    const idx = btAllCandles ? btAllCandles.findIndex(ac => ac.ts === c.ts) : -1;
+    return idx >= 0 ? btFullEma[idx] : null;
+  });
 
   const startBalance = parseFloat(document.getElementById('bt-balance-input')?.value) || 1000;
   const riskPct = parseFloat(document.getElementById('bt-risk-select')?.value) || 3;
@@ -1044,7 +1146,7 @@ function btRunGrid() {
     const prevSlPct = BT_SL_PCT;
     BT_SL_PCT = slPct / 100;
     const cells = BT_TP_LEVELS.map(tp => {
-      const trades = btRunLevel(btData, ema, tp);
+      const trades = btRunPeriod(btData, ema, tp, BT_START_TS, BT_END_TS, 'grid');
       const summary = btSummarise(trades, tp);
       const { finalBalance, pnl } = btCalcBalance(trades, startBalance, riskPct, compound);
       return { ...summary, finalBalance, pnl };
@@ -1058,6 +1160,221 @@ function btRunGrid() {
 
   btn.disabled = false;
   btn.style.opacity = '1';
+}
+
+// ── Bucket 4: Raw SL × TP Optimization Grid ───────────────────────────────────
+// Runs every SL% × TP-R combination independently for Bull Run 1 and Bull Run 2.
+// Requires "Both Bull Runs" mode to have been run first (btWindowSlices must exist).
+// Uses fixed 1% risk of original starting balance per trade, no compounding.
+// Does NOT filter, rank, or alter strategy logic. Stores all raw combinations.
+//
+// Stored in btOptGrid:
+//   Array of { slPct, tp, bull1, bull2, combined }
+//   Each period object: { trades, wins, losses, testEndExits, winRate,
+//                         profitFactor, netR, pnl, startBalance }
+//
+// Also populates btOptGridParams with the parameter universe for audit output.
+function btRunOptGrid() {
+  // Own status element and button — separate from the heatmap grid controls.
+  const statusEl  = document.getElementById('bt-opt-grid-status');
+  const btn       = document.getElementById('bt-opt-grid-run-btn');
+  const debugEl   = document.getElementById('bt-debug-output');
+
+  // Require both bull run periods to be available.
+  // btWindowSlices is only populated after "Both Bull Runs" completes.
+  if (!btWindowSlices || btWindowSlices.length < 2) {
+    if (statusEl) statusEl.textContent =
+      'Run "Both Bull Runs" mode above first — prerequisite data not available.';
+    return;
+  }
+
+  const bull1Slice = btWindowSlices.find(s => s.periodId === 'bull1');
+  const bull2Slice = btWindowSlices.find(s => s.periodId === 'bull2');
+  if (!bull1Slice || !bull2Slice) {
+    if (statusEl) statusEl.textContent =
+      'Could not find bull1 and bull2 window slices — re-run "Both Bull Runs".';
+    return;
+  }
+
+  // ── Read SL range parameters from the shared heatmap SL inputs ──────────────
+  const slMin  = parseFloat(document.getElementById('bt-grid-sl-min').value);
+  const slMax  = parseFloat(document.getElementById('bt-grid-sl-max').value);
+  const slStep = parseFloat(document.getElementById('bt-grid-sl-step').value);
+
+  if (!isFinite(slMin) || !isFinite(slMax) || !isFinite(slStep) || slStep <= 0 || slMax < slMin) {
+    if (statusEl) statusEl.textContent = 'Error: check SL min / max / step values above';
+    return;
+  }
+
+  const slValues = [];
+  for (let v = slMin; v <= slMax + 1e-9; v += slStep) {
+    slValues.push(parseFloat((Math.round(v * 1000) / 1000).toFixed(3)));
+  }
+
+  const expectedCombos = slValues.length * BT_TP_LEVELS.length;
+
+  // ── Read starting balance and risk % from the existing page controls ───────────
+  // Uses the same bt-balance-input and bt-risk-select already on the page —
+  // no duplicate inputs. Values are snapshotted into btOptGridParams at run
+  // start so results remain reproducible regardless of later UI changes.
+  const START_BALANCE = parseFloat(document.getElementById('bt-balance-input')?.value);
+  const RISK_PCT      = parseFloat(document.getElementById('bt-risk-select')?.value);
+  const COMPOUND      = false; // locked: fixed risk, no compounding
+
+  if (!isFinite(START_BALANCE) || START_BALANCE <= 0) {
+    if (statusEl) statusEl.textContent = 'Error: set a valid starting balance above before running';
+    return;
+  }
+  if (!isFinite(RISK_PCT) || RISK_PCT <= 0 || RISK_PCT > 100) {
+    if (statusEl) statusEl.textContent = 'Error: set a valid risk % above before running';
+    return;
+  }
+
+  // ── Log parameter universe before running ───────────────────────────────────
+  const paramLines = [
+    '=== BUCKET 4 OPT GRID — PARAMETER UNIVERSE ===',
+    `SL range     : ${slMin}% to ${slMax}% step ${slStep}%`,
+    `SL values    : [${slValues.join(', ')}]  (${slValues.length} levels)`,
+    `TP-R values  : [${BT_TP_LEVELS.join(', ')}]  (${BT_TP_LEVELS.length} levels)`,
+    `Combinations : ${slValues.length} SL × ${BT_TP_LEVELS.length} TP = ${expectedCombos} expected`,
+    `Starting balance : $${START_BALANCE.toLocaleString()}`,
+    `Risk per trade   : ${RISK_PCT}% of $${START_BALANCE.toLocaleString()} = $${(START_BALANCE * RISK_PCT / 100).toFixed(2)} fixed, no compounding`,
+    `Bull Run 1   : ${new Date(bull1Slice.wStart).toISOString().slice(0,10)} → ${new Date(bull1Slice.wEnd).toISOString().slice(0,10)} (${bull1Slice.sliceCandles.length} candles)`,
+    `Bull Run 2   : ${new Date(bull2Slice.wStart).toISOString().slice(0,10)} → ${new Date(bull2Slice.wEnd).toISOString().slice(0,10)} (${bull2Slice.sliceCandles.length} candles)`,
+    `Running...`,
+  ].join('\n');
+  if (debugEl) debugEl.value = paramLines;
+  console.log(paramLines);
+
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+  if (statusEl) statusEl.textContent = `Running ${expectedCombos} combos…`;
+
+  // ── Helper: summarise one period's trades into a raw cell object ─────────────
+  function periodCell(trades) {
+    const closed     = trades.filter(t => t.outcome !== 'Open');
+    const wins       = closed.filter(t => t.outcome === 'Win' || (t.outcome === 'test_end_exit' && t.rMade > 0));
+    const losses     = closed.filter(t => t.outcome === 'Loss' || (t.outcome === 'test_end_exit' && t.rMade <= 0));
+    const testEndExits = closed.filter(t => t.outcome === 'test_end_exit').length;
+    const netR       = closed.reduce((s, t) => s + (t.rMade || 0), 0);
+    const grossWin   = wins.reduce((s, t)   => s + Math.max(0, t.rMade || 0), 0);
+    const grossLoss  = losses.reduce((s, t) => s + Math.abs(Math.min(0, t.rMade || 0)), 0);
+    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : wins.length > 0 ? Infinity : 0;
+    const winRate    = closed.length > 0 ? wins.length / closed.length * 100 : 0;
+    // Dollar P&L: fixed risk per trade (non-compounding), using the run-start values
+    const riskAmount = START_BALANCE * RISK_PCT / 100;
+    const pnl        = closed.reduce((s, t) => s + riskAmount * (t.rMade || 0), 0);
+    return { trades: closed.length, wins: wins.length, losses: losses.length,
+             testEndExits, winRate, profitFactor, netR, pnl, startBalance: START_BALANCE };
+  }
+
+  // ── Run every SL × TP combination ──────────────────────────────────────────
+  const rawResults = [];
+  let actualRuns = 0;
+  let failedRuns = 0;
+
+  const savedSlPct = BT_SL_PCT;
+  for (const slPct of slValues) {
+    BT_SL_PCT = slPct / 100;
+    for (const tp of BT_TP_LEVELS) {
+      try {
+        const trades1 = btRunPeriod(
+          bull1Slice.sliceCandles, bull1Slice.sliceEma,
+          tp, bull1Slice.wStart, bull1Slice.wEnd, 'bull1'
+        );
+        const trades2 = btRunPeriod(
+          bull2Slice.sliceCandles, bull2Slice.sliceEma,
+          tp, bull2Slice.wStart, bull2Slice.wEnd, 'bull2'
+        );
+        const allTrades = [...trades1, ...trades2];
+
+        rawResults.push({
+          slPct,
+          tp,
+          bull1:    periodCell(trades1),
+          bull2:    periodCell(trades2),
+          combined: periodCell(allTrades),
+        });
+        actualRuns++;
+      } catch (err) {
+        failedRuns++;
+        console.error(`[OptGrid] SL=${slPct}% TP=${tp}R failed:`, err);
+      }
+    }
+  }
+  BT_SL_PCT = savedSlPct;
+
+  btOptGrid = rawResults;
+  // Store all parameters used for this run — these lock the reproducibility context.
+  btOptGridParams = {
+    slMin, slMax, slStep, slValues,
+    tpLevels:     BT_TP_LEVELS,
+    expectedCombos,
+    startBalance: START_BALANCE,  // snapshotted from bt-balance-input at run start
+    riskPct:      RISK_PCT,       // snapshotted from bt-risk-select at run start
+    riskPerTrade: START_BALANCE * RISK_PCT / 100,
+    compound:     COMPOUND,
+    runAt:        new Date().toISOString(),
+  };
+
+  // ── Completion summary ──────────────────────────────────────────────────────
+  const sampleLines = [];
+  const sampleItems = [
+    ...rawResults.slice(0, 3),
+    rawResults.length > 3 ? rawResults[rawResults.length - 1] : null,
+  ].filter(Boolean);
+
+  sampleLines.push('', '--- Raw result sample (first 3 + last combo) ---');
+  sampleItems.forEach((r, i) => {
+    const isLast = i === sampleItems.length - 1 && rawResults.length > 3;
+    sampleLines.push(
+      `${isLast ? '...' : ''}  SL ${r.slPct}% / TP ${r.tp}R` +
+      `  B1: ${r.bull1.trades}t ${r.bull1.wins}W/${r.bull1.losses}L pnl=$${r.bull1.pnl.toFixed(0)}` +
+      `  B2: ${r.bull2.trades}t ${r.bull2.wins}W/${r.bull2.losses}L pnl=$${r.bull2.pnl.toFixed(0)}` +
+      `  Comb: ${r.combined.trades}t pnl=$${r.combined.pnl.toFixed(0)} netR=${r.combined.netR.toFixed(2)}` +
+      `  tee=${r.combined.testEndExits}`
+    );
+  });
+
+  const summaryLines = [
+    '',
+    '=== BUCKET 4 COMPLETION SUMMARY ===',
+    `Expected combinations : ${expectedCombos}`,
+    `Actual runs completed : ${actualRuns}`,
+    `Failed runs           : ${failedRuns}`,
+    `btOptGrid entries     : ${btOptGrid.length}`,
+    `Starting balance used : $${START_BALANCE.toLocaleString()}`,
+    `Risk % used           : ${RISK_PCT}%  ($${(START_BALANCE * RISK_PCT / 100).toFixed(2)} per trade)`,
+    failedRuns === 0
+      ? 'Status: ALL COMBINATIONS COMPLETED SUCCESSFULLY'
+      : `Status: ${failedRuns} FAILED — check console`,
+    '====================================',
+  ].join('\n');
+
+  const fullDebug = paramLines.replace('\nRunning...', '') + sampleLines.join('\n') + '\n' + summaryLines;
+  if (debugEl) debugEl.value = fullDebug;
+  console.log(summaryLines);
+
+  if (statusEl) statusEl.textContent =
+    `Opt grid done · ${actualRuns}/${expectedCombos} combos · ${failedRuns === 0 ? '✓ all succeeded' : failedRuns + ' failed'} · btOptGrid ready`;
+
+  if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+}
+
+// ── Enable / disable the opt-grid button based on prerequisite state ─────────
+// Called by btRun() after a successful "Both Bull Runs" completion.
+// Also called at the start of btRun() to reset the button while a new run loads.
+function btEnableOptGridBtn() {
+  const btn    = document.getElementById('bt-opt-grid-run-btn');
+  const status = document.getElementById('bt-opt-grid-status');
+  const ready  = !!(btWindowSlices && btWindowSlices.length >= 2);
+  if (btn) {
+    btn.disabled = !ready;
+    btn.style.opacity = ready ? '1' : '0.4';
+    btn.title = ready ? '' : 'Run "Both Bull Runs" mode first to enable this button';
+  }
+  if (status && !ready) {
+    status.textContent = 'Run "Both Bull Runs" above to enable';
+  }
 }
 
 function btGridMetricValue(cell, metric) {

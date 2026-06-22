@@ -2214,6 +2214,24 @@
               <span style="margin-left:10px;color:var(--text-faint);">⚠ = under 15 closed trades</span>
             </div>
           </div>
+
+          <!-- Bucket 4: SL × TP Optimisation -->
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+                      margin-top:12px;padding-top:14px;border-top:1px solid var(--line-old);">
+            <button id="bt-opt-grid-run-btn"
+                    onclick="btRunOptGrid()"
+                    disabled
+                    title="Run Both Bull Runs first to enable this button"
+                    style="display:flex;align-items:center;gap:6px;background:var(--teal);
+                           color:#07060c;border:none;border-radius:7px;padding:6px 14px;
+                           font-size:12px;font-weight:700;cursor:pointer;opacity:0.4;
+                           transition:opacity 0.15s;">
+              <i class="ti ti-adjustments-horizontal" style="font-size:13px;"></i>Run SL &times; TP Optimisation
+            </button>
+            <span id="bt-opt-grid-status" style="font-size:11px;color:var(--text-faint);">
+              Run "Both Bull Runs" above to enable
+            </span>
+          </div>
         </div>
 
         <!-- Empty state -->
