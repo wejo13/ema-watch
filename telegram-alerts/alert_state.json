@@ -4,8 +4,8 @@
   "SOLUSDT": "below",
   "WLDUSDT": "above",
   "ZECUSDT": "below",
-  "TAOUSDT": "below",
   "XRPUSDT": "below",
+  "TAOUSDT": "below",
   "BNBUSDT": "below",
   "NIGHTUSDT": "below",
   "XAUTUSDT": "below",
@@ -36,8 +36,8 @@
   "DOTUSDT": "below",
   "RENDERUSDT": "below",
   "APTUSDT": "below",
-  "JSTUSDT": "below",
   "POLUSDT": "below",
+  "JSTUSDT": "touching",
   "WLFIUSDT": "below",
   "ARBUSDT": "below",
   "ALGOUSDT": "below",
@@ -46,5 +46,5 @@
   "ATOMUSDT": "below",
   "MORPHOUSDT": "below",
   "SKYUSDT": "below",
-  "QNTUSDT": "below"
+  "QNTUSDT": "touching"
 }
