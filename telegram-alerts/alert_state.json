@@ -21,10 +21,10 @@
   "PAXGUSDT": "below",
   "XLMUSDT": "below",
   "LTCUSDT": "below",
-  "UNIUSDT": "touching",
+  "UNIUSDT": "below",
+  "PUMPUSDT": "below",
   "BCHUSDT": "below",
   "XMRUSDT": "below",
-  "PUMPUSDT": "below",
   "DEXEUSDT": "above",
   "INJUSDT": "below",
   "ASTERUSDT": "below",
@@ -43,7 +43,6 @@
   "SHIBUSDT": "below",
   "ETCUSDT": "below",
   "ATOMUSDT": "below",
-  "MORPHOUSDT": "below",
   "NIGHTUSDT": "below",
   "SKYUSDT": "below"
 }
