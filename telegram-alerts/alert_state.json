@@ -18,8 +18,8 @@
   "LITUSDT": "below",
   "PAXGUSDT": "below",
   "PEPEUSDT": "below",
-  "XAUTUSDT": "below",
   "LINKUSDT": "below",
+  "XAUTUSDT": "below",
   "XLMUSDT": "below",
   "LTCUSDT": "below",
   "PUMPUSDT": "below",
@@ -28,8 +28,8 @@
   "INJUSDT": "below",
   "ASTERUSDT": "below",
   "BCHUSDT": "below",
-  "ONDOUSDT": "below",
   "FILUSDT": "below",
+  "ONDOUSDT": "below",
   "HBARUSDT": "below",
   "WLFIUSDT": "touching",
   "DOTUSDT": "below",
@@ -45,7 +45,8 @@
   "ATOMUSDT": "below",
   "ETCUSDT": "below",
   "NIGHTUSDT": "below",
-  "MORPHOUSDT": "above",
+  "MORPHOUSDT": "touching",
   "SKYUSDT": "below",
-  "QNTUSDT": "below"
+  "QNTUSDT": "below",
+  "NEXOUSDT": "below"
 }
