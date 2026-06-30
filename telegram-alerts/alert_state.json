@@ -11,8 +11,8 @@
   "NEARUSDT": "below",
   "AAVEUSDT": "above",
   "SUIUSDT": "below",
-  "ADAUSDT": "below",
   "ENAUSDT": "below",
+  "ADAUSDT": "below",
   "TAOUSDT": "below",
   "AVAXUSDT": "below",
   "LITUSDT": "below",
@@ -45,7 +45,7 @@
   "ATOMUSDT": "below",
   "ETCUSDT": "below",
   "NIGHTUSDT": "below",
-  "MORPHOUSDT": "touching",
+  "MORPHOUSDT": "above",
   "SKYUSDT": "below",
   "QNTUSDT": "below",
   "NEXOUSDT": "below"
